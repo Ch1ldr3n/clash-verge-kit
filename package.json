@@ -1,0 +1,54 @@
+{
+  "name": "clash-verge-kit",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "A local CLI for generating and safely installing Clash Verge Rev nested scripts.",
+  "license": "MIT",
+  "author": "Ch1ldr3n",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ch1ldr3n/clash-verge-kit.git"
+  },
+  "homepage": "https://github.com/Ch1ldr3n/clash-verge-kit#readme",
+  "bugs": {
+    "url": "https://github.com/Ch1ldr3n/clash-verge-kit/issues"
+  },
+  "keywords": [
+    "clash-verge-rev",
+    "mihomo",
+    "cli",
+    "nested-script"
+  ],
+  "scripts": {
+    "build:cli": "tsc -b && vite build --config vite.cli.config.ts",
+    "cli": "npm run build:cli && node dist/cli/cli.mjs",
+    "prepack": "npm run build:cli",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:mihomo": "node scripts/test-mihomo.mjs",
+    "verify:privacy": "node scripts/verify-build.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
+    "verify:package-install": "node scripts/verify-package-install.mjs",
+    "check": "npm run test && npm run build:cli && npm run verify:privacy && npm run verify:package",
+    "check:release": "npm run check && npm run verify:package-install"
+  },
+  "dependencies": {
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.2",
+    "typescript": "7.0.2",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "bin": {
+    "clash-verge-kit": "dist/cli/cli.mjs"
+  },
+  "files": [
+    "dist/cli/cli.mjs"
+  ]
+}

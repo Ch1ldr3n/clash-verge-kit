@@ -1,0 +1,22 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+
+# Local files may contain subscription URLs or tokens
+.env
+.env.*
+!.env.example
+*.local.js
+*.local.yaml
+*.local.yml
+
+# Editors and operating systems
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.tsbuildinfo
+
+# Local development-tool state
+.codegraph/
