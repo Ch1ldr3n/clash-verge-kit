@@ -1,17 +1,17 @@
-# Domain Docs
+# 领域文档
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+工程 Skills 探索代码库时，应按本文说明使用本仓库的领域文档。
 
-## Before exploring, read these
+## 探索前先阅读
 
-- `CONTEXT.md` at the repo root.
-- `docs/adr/`: read ADRs that touch the area you're about to work in.
+- 仓库根目录的 `CONTEXT.md`。
+- `docs/adr/`：阅读与即将处理区域相关的 ADR。
 
-If either does not exist, proceed silently.
+任一位置不存在时，直接继续，无需提示。
 
-## File structure
+## 文件结构
 
-This is a single-context repository:
+本仓库采用单一上下文结构：
 
 ```text
 /
@@ -20,12 +20,12 @@ This is a single-context repository:
 └── src/
 ```
 
-## Use the glossary's vocabulary
+## 使用术语表中的词汇
 
-When output names a domain concept, use the term defined in `CONTEXT.md`. Do not drift to synonyms the glossary explicitly avoids.
+输出中提到领域概念时，使用 `CONTEXT.md` 定义的术语，不要改用术语表明确要求避免的同义词。
 
-If a needed concept is absent, reconsider whether it is project language or note the gap for domain modeling.
+如果缺少所需概念，重新判断它是否属于项目语言；确属缺口时，将其记录为待完善的领域建模事项。
 
-## Flag ADR conflicts
+## 标明 ADR 冲突
 
-If output contradicts an existing ADR, surface the conflict explicitly rather than silently overriding it.
+如果输出与现有 ADR 冲突，明确指出冲突，不要静默覆盖既有决策。

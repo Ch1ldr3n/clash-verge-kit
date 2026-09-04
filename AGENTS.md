@@ -1,4 +1,4 @@
-## Project rules
+## 项目规则
 
 - 开始工作前阅读 `CONTEXT.md` 和相关 `docs/adr/`，遵循其中的术语与产品边界。
 - 不提交真实订阅 URL、token、`profiles.yaml`、YAML 原文或完整生成脚本。
@@ -7,14 +7,14 @@
 
 ## Agent skills
 
-### Issue tracker
+### 问题追踪器
 
-Issues and specs are tracked in this repository's GitHub Issues. See `docs/agents/issue-tracker.md`.
+本仓库的问题与规格记录在 GitHub Issues 中。参见 `docs/agents/issue-tracker.md`。
 
-### Triage labels
+### 分类标签
 
-Use the five default triage labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+使用五个默认分类标签：`needs-triage`、`needs-info`、`ready-for-agent`、`ready-for-human` 和 `wontfix`。参见 `docs/agents/triage-labels.md`。
 
-### Domain docs
+### 领域文档
 
-This is a single-context repository with `CONTEXT.md` at the root and ADRs under `docs/adr/`. See `docs/agents/domain.md`.
+本仓库采用单一上下文结构：根目录使用 `CONTEXT.md`，ADR 存放在 `docs/adr/`。参见 `docs/agents/domain.md`。
