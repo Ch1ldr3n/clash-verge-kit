@@ -6,6 +6,8 @@ Clash Verge Kit 是一个面向 [Clash Verge Rev](https://github.com/clash-verge
 
 > 当前状态：项目尚未发布到 npm。现在请从源码运行，暂时没有可用的 `npm` 或 `npx` 一键安装命令。
 
+规则分流的产品范围已整理为[规则分流 V1 规格](docs/specs/2026-09-05-rule-routing-v1.md)，尚未实现，不属于下方当前可用功能。
+
 ## 它解决什么问题
 
 如果你在 Clash Verge Rev 中使用多个订阅，手工编写嵌套脚本通常需要自己处理订阅来源、代理组名称、重复项和脚本写入位置。Clash Verge Kit 把这些步骤整理成一个终端向导，并在真正写入前让你检查结果。

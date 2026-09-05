@@ -6,6 +6,8 @@ Clash Verge Kit is a local command-line tool for [Clash Verge Rev](https://githu
 
 > Current status: this project has not been published to npm. Run it from source for now; there is no working one-command `npm` or `npx` installation yet.
 
+The product scope for rule routing is approved in the [Rule Routing V1 specification](docs/specs/2026-09-05-rule-routing-v1.md) (Chinese). It is not implemented and is not part of the currently available features below.
+
 ## What problem does it solve?
 
 Manually writing a nesting script means handling subscription sources, proxy-group names, duplicates, and script destinations yourself. Clash Verge Kit turns that work into a guided terminal flow and lets you review the result before anything is written.
