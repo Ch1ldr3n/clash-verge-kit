@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLocalProfileRepository } from "../scripts/local-profile-repository";
 import { generateClashVergeScript } from "../src/generator";
+import { parseManagedScript } from "../src/script-import";
 import type { GeneratorSpec } from "../src/types";
 
 const temporaryRoots: string[] = [];
@@ -126,6 +127,74 @@ afterEach(async () => {
 });
 
 describe("local profile repository", () => {
+  it("preserves all old nesting relationships when adding AI to a combined script", async () => {
+    const parsed = parseManagedScript(generatedScript());
+    if (!parsed.ok) throw new Error("invalid-fixture");
+    const originalSpec = { ...parsed.spec, children: [...parsed.spec.children, {
+      id: "child-2", groupName: "Second", mode: "http" as const, source: "https://second.example.test/synthetic",
+    }] };
+    const original = generateClashVergeScript(originalSpec).fullScript;
+    const { profilesFile, scriptFile } = await createProfileFixture(original);
+    const repository = createLocalProfileRepository({ profileFileCandidates: () => [profilesFile] });
+    const [target] = await repository.list();
+    const ai = { enabled: true, mode: "existing" as const, groupName: "Main", customDomains: [], ruleSource: "services-v1" as const };
+    const incomplete = generateClashVergeScript({ ...parsed.spec, ai }).fullScript;
+    expect(await repository.installManagedScript(target!.id, incomplete)).toEqual({ status: "nesting-conflict" });
+    expect(await readFile(scriptFile, "utf8")).toBe(original);
+    const changedPrefix = generateClashVergeScript({ ...originalSpec, ai,
+      children: originalSpec.children.map((child) => ({ ...child, nodePrefix: `[${child.groupName}]` })),
+    }).fullScript;
+    expect(await repository.installManagedScript(target!.id, changedPrefix)).toEqual({ status: "nesting-conflict" });
+    const complete = generateClashVergeScript({ ...originalSpec, ai }).fullScript;
+    expect(await repository.installManagedScript(target!.id, complete)).toEqual({ status: "written", targetIsCurrent: true });
+    expect(await readFile(scriptFile, "utf8")).toBe(complete);
+  });
+
+  it("writes an AI-only script to an empty target without changing the subscription index", async () => {
+    const { profilesFile, scriptFile } = await createProfileFixture();
+    const indexBefore = await readFile(profilesFile, "utf8");
+    const repository = createLocalProfileRepository({ profileFileCandidates: () => [profilesFile] });
+    const [target] = await repository.list();
+    const parsed = parseManagedScript(generatedScript());
+    if (!parsed.ok) throw new Error("invalid-fixture");
+    const incoming = generateClashVergeScript({ ...parsed.spec, parentGroupMode: "auto", parentGroupName: "", children: [],
+      ai: { enabled: true, mode: "existing", groupName: "Main", customDomains: [], ruleSource: "services-v1" },
+    });
+    expect(await repository.installManagedScript(target!.id, incoming.fullScript))
+      .toEqual({ status: "written", targetIsCurrent: true });
+    expect(await readFile(scriptFile, "utf8")).toBe(incoming.fullScript);
+    expect(await readFile(profilesFile, "utf8")).toBe(indexBefore);
+  });
+
+  it("rejects a generated AI script for a different target", async () => {
+    const { profilesFile, scriptFile } = await createProfileFixture();
+    const repository = createLocalProfileRepository({ profileFileCandidates: () => [profilesFile] });
+    const [target] = await repository.list();
+    const incoming = generateClashVergeScript({
+      targetProfile: { name: "Another", source: "https://other.example.test/synthetic" },
+      parentGroupMode: "auto", parentGroupName: "", children: [],
+      ai: { enabled: true, mode: "existing", groupName: "Main", customDomains: [], ruleSource: "services-v1" },
+    });
+    expect(await repository.installManagedScript(target!.id, incoming.fullScript)).toEqual({ status: "invalid-script" });
+    expect(await readFile(scriptFile, "utf8")).toBe(defaultScript);
+  });
+
+  it("does not replace an existing nesting script with an AI-only script", async () => {
+    const original = generatedScript();
+    const { profilesFile, scriptFile } = await createProfileFixture(original);
+    const repository = createLocalProfileRepository({ profileFileCandidates: () => [profilesFile] });
+    const [target] = await repository.list();
+    const parsed = parseManagedScript(original);
+    if (!parsed.ok) throw new Error("invalid-fixture");
+    const incoming = generateClashVergeScript({ ...parsed.spec, parentGroupMode: "auto", parentGroupName: "", children: [],
+      ai: { enabled: true, mode: "existing", groupName: "Main", customDomains: [], ruleSource: "services-v1" },
+    });
+    expect(incoming.valid).toBe(true);
+    expect(await repository.installManagedScript(target!.id, incoming.fullScript))
+      .toEqual({ status: "nesting-conflict" });
+    expect(await readFile(scriptFile, "utf8")).toBe(original);
+  });
+
   it("keeps the Kit historical-compact representation reproducible", () => {
     const digest = createHash("sha256")
       .update(historicalCompactedScript(generatedScript()))
@@ -340,4 +409,40 @@ items:
     expect(result).toEqual({ status: "custom-script-conflict" });
     expect(await readFile(scriptFile, "utf8")).toBe(modifiedScript);
   });
+});
+
+it("reopens an authenticated saved plan, backs up before saving and refuses edits based on an outdated read", async () => {
+  const original = generatedScript();
+  const fixture = await createProfileFixture(original);
+  const repository = createLocalProfileRepository({ profileFileCandidates: () => [fixture.profilesFile] });
+  const target = (await repository.list())[0]!;
+  const saved = await repository.readManagedPlan!(target.id);
+  expect(saved.status).toBe("saved");
+  if (saved.status !== "saved") throw new Error("expected saved plan");
+  const draft = saved.spec;
+  draft.routing = { sources: [{ id: "target", kind: "target" }],
+    outlets: [{ id: "outlet", kind: "existing", groupName: "Main" }],
+    modules: [{ id: "ai", kind: "ai", enabled: true, outletId: "outlet", ruleSource: "category-ai-v1", customDomains: [] }] };
+  const next = generateClashVergeScript(draft).fullScript;
+  expect(await repository.installManagedScript(target.id, next, saved.revision)).toMatchObject({ status: "written" });
+  const reopened = await repository.readManagedPlan!(target.id);
+  expect(reopened).toMatchObject({ status: "saved", spec: { routing: draft.routing } });
+  expect(await repository.installManagedScript(target.id, original, saved.revision)).toEqual({ status: "concurrent-change" });
+  expect(await readFile(fixture.scriptFile, "utf8")).toBe(next);
+  const backup = `${fixture.scriptFile}.kit-backup-${createHash("sha256").update(original).digest("hex").slice(0, 16)}`;
+  expect(await readFile(backup, "utf8")).toBe(original);
+});
+
+it("inspects only node identities from safe static and provider snapshots, distinguishing unreadable providers", async () => {
+  const fixture = await createProfileFixture();
+  const directory = path.dirname(fixture.profilesFile);
+  await writeFile(path.join(directory, "cached.yaml"), "proxies:\n  - name: same[1]\n    type: http\n    password: private-node-secret\n");
+  await writeFile(path.join(directory, "profiles", "example.yaml"), "proxies:\n  - name: static+node\nproxy-providers:\n  a:\n    type: file\n    path: ./cached.yaml\n    override:\n      additional-prefix: Existing\n  b:\n    type: http\n    url: https://provider.example.test/secret\n    path: ./missing-cache.yaml\n");
+  const repository = createLocalProfileRepository({ profileFileCandidates: () => [fixture.profilesFile] });
+  const nodes = await repository.inspectRoutingNodes!((await repository.list())[0]!.id);
+  expect(nodes).toMatchObject({ status: "partial", nodes: [
+    { provider: null, name: "static+node" }, { provider: "a", name: "same[1]" },
+  ], failures: [{ provider: "b", reason: "unreadable" }] });
+  expect(JSON.stringify(nodes)).not.toContain("private-node-secret");
+  expect(JSON.stringify(nodes)).not.toContain("https://provider.example.test/secret");
 });

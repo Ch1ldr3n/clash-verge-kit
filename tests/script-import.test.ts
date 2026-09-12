@@ -64,7 +64,7 @@ describe("managed script import", () => {
     expect(parseManagedScript(
       `${generated.fullScript}\n/* CLASH_VERGE_KIT_MANAGEMENT_V1 \nnot-valid!\nCLASH_VERGE_KIT_MANAGEMENT_END */`,
     )).toMatchObject({ ok: false, error: { code: "metadata-duplicate" } });
-    expect(parseManagedScript("/* CLASH_VERGE_KIT_MANAGEMENT_V2\nAA\nCLASH_VERGE_KIT_MANAGEMENT_END */"))
+    expect(parseManagedScript("/* CLASH_VERGE_KIT_MANAGEMENT_V999\nAA\nCLASH_VERGE_KIT_MANAGEMENT_END */"))
       .toMatchObject({ ok: false, error: { code: "version-unsupported" } });
     expect(parseManagedScript("x".repeat(2 * 1024 * 1024 + 1)))
       .toMatchObject({ ok: false, error: { code: "file-too-large" } });

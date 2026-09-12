@@ -26,8 +26,12 @@
 
 - `scripts/cli.ts`：唯一运行入口，组合终端 I/O、本机配置仓库、远程读取、生成器和剪贴板。
 - `scripts/cli-workflow.ts`：组织交互和状态迁移，不直接读取真实文件或网络，测试使用假 I/O 与假适配器。
+- `src/routing-plan-editing.ts`：集中已保存方案转为编辑草稿、切换已有出口、手选节点和关闭分流的纯编辑规则，返回独立的新草稿，保留旧规则来源、自定义域名、移除依据与嵌套配置。两个 CLI 交互模块共用此入口；本机检查、返回/取消、版本门槛和交付确认仍由 CLI 组织，管理会话继续同步生成。
+- 编辑规则与保存格式识别分开：`src/routing-plan.ts` 的归一化仍参与 V3 校验与字节重建，不承担编辑动作，也不因编辑重构改变历史识别语义。
 - `src/generator.ts`、`src/integrity.ts`、`src/script-import.ts`、`src/managed-script-integrity.ts`、`src/types.ts`、`src/workspace-session.ts`：共用 TypeScript 核心；CLI 调用现有生成器，不维护第二套生成逻辑。
+- 生成器内部统一组装完整脚本与遮罩预览：分别使用原始数据和遮罩数据，共用管理块、嵌套入口衔接与分流脚本的组装步骤。历史 V1/V2 模板、V3 `routing-v1` 模板和遮罩规则保持原字节合同；合成样例的固定摘要用于检查重构前后输出一致，遮罩测试同时检查正文与解码后的管理块。
 - `scripts/clash-verge-locator.ts`、`scripts/local-profile-repository.ts`、`scripts/profile-yaml.ts`：有限位置发现、配置解析、进程内不透明 ID 和安全脚本写入。
+- `src/managed-script-integrity.ts` 的 `inspectManagedScript` 集中同一份脚本内容的管理块解析与完整字节识别，返回解析出的设置及独立的可信性结论；设置可解析不代表正文可信。读取和写入共用此结果，保留各自的可编辑条件、冲突判断顺序和错误映射。编辑期版本核对、写入前及备份后的重新读取和真实路径检查仍由本机配置仓库执行，不跨文件快照复用检查结果。
 - `scripts/remote-profile-reader.ts`：用户确认后的公网 HTTPS 读取与 SSRF、跳转、超时、大小限制。
 
 ## 运行边界

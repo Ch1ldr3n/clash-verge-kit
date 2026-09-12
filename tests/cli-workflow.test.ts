@@ -1,4 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import vm from "node:vm";
+import { generateClashVergeScript } from "../src/generator";
+import { parseManagedScript } from "../src/script-import";
+import { classifyManagedScript } from "../src/managed-script-integrity";
 import { BackRequestedError, type CliIO } from "../scripts/cli-io";
 import { runCliWorkflow, type CliWorkflowDependencies } from "../scripts/cli-workflow";
 import type { LocalProfileRepository } from "../scripts/local-profile-repository";
@@ -167,6 +171,173 @@ function dependencies(
 }
 
 describe("CLI workflow", () => {
+  it("copies AI routing from the feature menu without asking for a child subscription", async () => {
+    const io = scriptedIo([
+      { method: "choose", value: 0 }, // language
+      { method: "choose", value: 1 }, // AI feature
+      { method: "choose", value: 0 }, // target
+      { method: "choose", value: 0 }, // outlet
+      { method: "confirm", value: true },
+      { method: "choose", value: 0 }, // review
+      { method: "choose", value: 1 }, // copy
+      { method: "choose", value: "back" },
+    ]);
+    const copyScript = vi.fn(async (_script: string) => true);
+    const deps = dependencies(io, localRepository([
+      localSelection("main", "Main", mainUrl, ["PROXY"]),
+    ]), { generate: generateClashVergeScript, copyScript });
+    await runCliWorkflow({ ...deps, entryMode: "choose" } as CliWorkflowDependencies);
+    const script = copyScript.mock.calls[0]?.[0] ?? "";
+    expect(classifyManagedScript(script)).toBe("current-readable");
+    expect(parseManagedScript(script)).toMatchObject({ ok: true, spec: {
+      children: [], routing: {
+        outlets: [{ kind: "existing", groupName: "PROXY" }],
+        modules: [{ enabled: true, ruleSource: "category-ai-v1" }],
+      },
+    } });
+    expect(io.menus.some((menu) => menu.prompt.includes("选择子订阅"))).toBe(false);
+    expect(io.output.join("\n")).not.toContain(mainUrl);
+    expect(io.menus.at(-1)?.prompt).toContain("重新激活");
+  });
+
+  it.each([false, "back"] as const)("leaves the generated draft unchanged when AI consent is %s", async (consent) => {
+    const io = scriptedIo([
+      { method: "choose", value: 0 }, { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 6 }, { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "confirm", value: consent },
+      ...(consent === "back" ? [
+        { method: "choose" as const, value: "back" as const },
+        { method: "choose" as const, value: "back" as const },
+      ] : []),
+      { method: "choose", value: 0 }, { method: "choose", value: 1 },
+      { method: "choose", value: "back" },
+    ]);
+    const copyScript = vi.fn(async (_script: string) => true);
+    await runCliWorkflow(dependencies(io, localRepository([
+      localSelection("main", "Main", mainUrl, ["PROXY"]),
+      localSelection("child", "Child", childUrl, []),
+    ]), { generate: generateClashVergeScript, copyScript }));
+    expect(parseManagedScript(copyScript.mock.calls[0]![0])).toMatchObject({ ok: true, spec: { ai: { enabled: false } } });
+    if (consent === "back") {
+      expect(io.menus.filter((menu) => menu.prompt.startsWith("选择 AI 出口组"))).toHaveLength(2);
+      expect(io.menus.filter((menu) => menu.prompt === "配置本次草稿的 AI 分流")).toHaveLength(2);
+    }
+  });
+
+  it("can disable AI routing again in the current draft using English menus", async () => {
+    const io = scriptedIo([
+      { method: "choose", value: 1 }, { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 6 }, { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "confirm", value: true },
+      { method: "choose", value: 6 }, { method: "choose", value: 1 },
+      { method: "choose", value: 0 }, { method: "choose", value: 1 },
+      { method: "choose", value: "back" },
+    ]);
+    const copyScript = vi.fn(async (_script: string) => true);
+    await runCliWorkflow(dependencies(io, localRepository([
+      localSelection("main", "Main", mainUrl, ["PROXY"]),
+      localSelection("child", "Child", childUrl, []),
+    ]), { generate: generateClashVergeScript, copyScript }));
+    const script = copyScript.mock.calls[0]![0];
+    expect(parseManagedScript(script)).toMatchObject({ ok: true, spec: { ai: { enabled: false } } });
+    expect(script).not.toContain("category-ai-!cn.mrs");
+    expect(io.output).toContain("AI routing is disabled in this draft.");
+    expect(io.confirmations[0]).toContain("shared services");
+  });
+
+  it("keeps target inspection failures source-free and leaves the AI draft unchanged", async () => {
+    const io = scriptedIo([
+      { method: "choose", value: 0 }, { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 6 }, { method: "choose", value: 0 },
+      { method: "choose", value: "back" },
+    ]);
+    const profiles = localRepository([
+      localSelection("main", "Main", mainUrl, ["PROXY"]),
+      localSelection("child", "Child", childUrl, []),
+    ]);
+    const select = profiles.select.bind(profiles);
+    let reads = 0;
+    profiles.select = async (id) => {
+      if (id === "main" && ++reads > 1) throw new Error(mainUrl);
+      return select(id);
+    };
+    await runCliWorkflow(dependencies(io, profiles, { generate: generateClashVergeScript }));
+    expect(io.output.join("\n")).toContain("无法核实目标或 AI 出口组");
+    expect(io.output.join("\n")).not.toContain("private-main-token");
+    expect(io.confirmations).toHaveLength(0);
+  });
+
+  it.each([3, 4])("blocks AI delivery when its outlet disappears on target check %s", async (missingOnRead) => {
+    const io = scriptedIo([
+      { method: "choose", value: 0 }, { method: "choose", value: 0 },
+      { method: "choose", value: 0 }, { method: "choose", value: 0 },
+      { method: "choose", value: 6 }, { method: "choose", value: 0 },
+      { method: "choose", value: 1 }, { method: "confirm", value: true },
+      { method: "choose", value: 0 },
+      ...(missingOnRead === 4 ? [{ method: "choose" as const, value: 1 }] : []),
+      { method: "choose", value: "back" },
+    ]);
+    const main = localSelection("main", "Main", mainUrl, ["PROXY", "AI出口"]);
+    const profiles = localRepository([main, localSelection("child", "Child", childUrl, [])]);
+    const select = profiles.select.bind(profiles);
+    let mainReads = 0;
+    profiles.select = async (id) => {
+      if (id === "main" && ++mainReads >= missingOnRead) return localSelection("main", "Main", mainUrl, ["PROXY"]);
+      return select(id);
+    };
+    const deps = dependencies(io, profiles, { generate: generateClashVergeScript });
+    await runCliWorkflow(deps);
+    expect(io.output.join("\n")).toContain("无法核实目标或 AI 出口组");
+    expect(io.menus.filter((menu) => menu.prompt.startsWith("请检查方向并选择交付方式")))
+      .toHaveLength(missingOnRead === 4 ? 1 : 0);
+    expect(deps.copyScript).not.toHaveBeenCalled();
+  });
+
+  it.each(["copy", "write"] as const)("selects an existing AI outlet and delivers the regenerated compatible script via %s", async (delivery) => {
+    const io = scriptedIo([
+      { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 6 },
+      { method: "choose", value: 0 },
+      { method: "choose", value: 1 },
+      { method: "confirm", value: true },
+      { method: "choose", value: 0 },
+      { method: "choose", value: delivery === "copy" ? 1 : 0 },
+      { method: "choose", value: "back" },
+    ]);
+    const copyScript = vi.fn(async (_script: string) => true);
+    const profiles = localRepository([
+      localSelection("main", "Main", mainUrl, ["PROXY", "AI出口"]),
+      localSelection("child", "Child", childUrl, []),
+    ]);
+    const install = vi.spyOn(profiles, "installManagedScript").mockResolvedValue({ status: "written", targetIsCurrent: true });
+    await runCliWorkflow(dependencies(io, profiles, { generate: generateClashVergeScript, copyScript }));
+
+    const script = delivery === "copy" ? copyScript.mock.calls[0]![0] : install.mock.calls[0]![1];
+    expect(classifyManagedScript(script)).toBe("current-readable");
+    expect(parseManagedScript(script)).toMatchObject({ ok: true, spec: {
+      routing: { modules: [{ enabled: true }], outlets: [{ kind: "existing", groupName: "AI出口" }] },
+      children: [{ source: childUrl }],
+    } });
+    const originalRules = ["DOMAIN-SUFFIX,openai.com,PROXY", "MATCH,PROXY"];
+    const outlet = { name: "AI出口", type: "select", proxies: ["DIRECT"] };
+    const config = { "proxy-groups": [{ name: "PROXY", type: "select", proxies: ["DIRECT"] }, outlet], rules: originalRules };
+    const result = vm.runInNewContext(`${script}\nmain(config, "Main")`, { config, console }, { timeout: 1000 });
+    expect(result.rules[0]).toMatch(/^RULE-SET,.*?,AI出口$/);
+    expect(result.rules.slice(1)).toEqual(originalRules);
+    expect(result["proxy-groups"].find((group: { name: string }) => group.name === "AI出口")).toEqual(outlet);
+    expect(io.output.join("\n")).toContain("AI → AI出口");
+    expect(io.output.join("\n")).not.toContain("private-main-token");
+    expect(io.confirmations.join("\n")).toContain("共用服务");
+  });
+
   it("exits from the first language menu when zero is selected", async () => {
     const io = scriptedIo([
       { method: "choose", value: "back" },
@@ -959,7 +1130,7 @@ describe("CLI workflow", () => {
     });
     expect(io.output.join("\n")).not.toContain(validResult.fullScript);
     expect(io.menus).toContainEqual({
-      prompt: "✓ 脚本已复制。粘贴到目标订阅的扩展脚本后，请重新激活该订阅。",
+      prompt: "✓ 脚本已复制，尚未保存到订阅。粘贴到目标订阅的扩展脚本后，请重新激活该订阅。",
       options: ["重新配置"],
     });
   });
@@ -1177,6 +1348,7 @@ describe("CLI workflow", () => {
       "查看配置详情",
       "查看遮罩脚本",
       "重新开始配置",
+      "配置 AI 出口",
     ]);
     expect(io.menus.some((menu) => menu.prompt === "更多操作")).toBe(false);
   });

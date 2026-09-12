@@ -13,6 +13,7 @@ function cloneGeneratorSpec(spec: GeneratorSpec): GeneratorSpec {
     children: spec.children.map((child) => ({ ...child })),
     removedChildren: spec.removedChildren?.map((child) => ({ ...child })),
     ai: { ...spec.ai, customDomains: [...spec.ai.customDomains] },
+    ...(spec.routing ? { routing: structuredClone(spec.routing) } : {}),
   };
 }
 
