@@ -1,5 +1,6 @@
 import { generateClashVergeScript } from "./generator.ts";
 import { parseManagedScript } from "./script-import.ts";
+import type { GeneratorSpec } from "./types";
 
 const MANAGEMENT_START = /^\/\* CLASH_VERGE_KIT_MANAGEMENT_V\d+$/;
 const MANAGEMENT_END = /^CLASH_VERGE_KIT_MANAGEMENT_END \*\/$/;
@@ -62,13 +63,26 @@ function compactHistoricalManagedScript(script: string): string | null {
 
 export type ManagedScriptAuthenticity = "current-readable" | "historical-compact" | "invalid";
 
-export function classifyManagedScript(script: string): ManagedScriptAuthenticity {
+// Parsed settings describe the management block, even when the script body is
+// invalid. Only a non-invalid authenticity establishes a full byte match.
+export type ManagedScriptInspection =
+  | { authenticity: "invalid"; parsedSpec: GeneratorSpec | null }
+  | { authenticity: Exclude<ManagedScriptAuthenticity, "invalid">; parsedSpec: GeneratorSpec };
+
+export function inspectManagedScript(script: string): ManagedScriptInspection {
   const imported = parseManagedScript(script);
-  if (!imported.ok) return "invalid";
-  const generated = generateClashVergeScript(imported.spec);
-  if (!generated.valid) return "invalid";
-  if (script === generated.fullScript) return "current-readable";
-  return script === compactHistoricalManagedScript(generated.fullScript)
-    ? "historical-compact"
-    : "invalid";
+  if (!imported.ok) return { authenticity: "invalid", parsedSpec: null };
+  const parsedSpec = imported.spec;
+  const generated = generateClashVergeScript(imported.spec,
+    imported.generatorRevision ? { routingRevision: imported.generatorRevision } : {});
+  if (!generated.valid) return { authenticity: "invalid", parsedSpec };
+  if (script === generated.fullScript) return { authenticity: "current-readable", parsedSpec };
+  return {
+    authenticity: script === compactHistoricalManagedScript(generated.fullScript) ? "historical-compact" : "invalid",
+    parsedSpec,
+  };
+}
+
+export function classifyManagedScript(script: string): ManagedScriptAuthenticity {
+  return inspectManagedScript(script).authenticity;
 }

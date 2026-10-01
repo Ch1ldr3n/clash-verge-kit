@@ -12,6 +12,7 @@ export interface ChildSubscription {
 }
 
 export interface AiPreset {
+  ruleSource?: "services-v1";
   enabled: boolean;
   mode: "existing" | "create";
   groupName: string;
@@ -41,6 +42,41 @@ export interface GeneratorSpec {
   children: ChildSubscription[];
   removedChildren?: RemovedChildSubscription[];
   ai: AiPreset;
+  routing?: RoutingPlan;
+}
+
+export interface RoutingPlan {
+  legacyAi?: {
+    ruleSource: "services-v1" | "legacy-ai-v1";
+    groupName: string;
+    customDomains: string[];
+  };
+  sources: ({ id: string; kind: "target" } | RoutingSubscriptionSource)[];
+  outlets: ({ id: string; kind: "existing"; groupName: string }
+    | { id: string; kind: "selected"; groupName: string; nodes: RoutingNodeReference[] })[];
+  modules: {
+    id: string;
+    kind: "ai";
+    enabled: boolean;
+    outletId: string;
+    ruleSource: "category-ai-v1" | "services-v1" | "legacy-ai-v1";
+    customDomains: string[];
+  }[];
+}
+
+export interface RoutingNodeReference {
+  sourceId: string;
+  provider: string | null;
+  name: string;
+}
+
+export interface RoutingSubscriptionSource {
+  id: string;
+  kind: "subscription";
+  name: string;
+  mode: ProviderMode;
+  source: string;
+  providers?: { id: string; mode: ProviderMode; source: string; interval: number }[];
 }
 
 export type DiagnosticSeverity = "error" | "warning" | "success";
@@ -71,6 +107,7 @@ export interface TopologySummary {
   removedCount: number;
   aiEnabled: boolean;
   aiGroupName?: string;
+  aiOutletKind?: "existing" | "selected";
 }
 
 export interface GenerationResult {

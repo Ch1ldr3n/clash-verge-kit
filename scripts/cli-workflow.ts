@@ -14,16 +14,24 @@ import {
 } from "../src/workspace-session.ts";
 import type { GenerationResult, GeneratorSpec, Language } from "../src/types.ts";
 import { MAX_MANAGED_CHILDREN } from "../src/script-import.ts";
+import { collectSelectedNodes, verifySelectedNodes } from "./cli-routing-nodes.ts";
+import { editRoutingPlan } from "../src/routing-plan-editing.ts";
 
 type CliMessages = ReturnType<typeof getCliMessages>;
+type GroupMenuMessages = Pick<CliMessages,
+  "parentGroupSelect" | "singleParentGroupSelected" | "parentGroupsTruncated"
+> & Record<"noDetectedParentGroup" | "previousPage" | "nextPage" | "filterParentGroups"
+  | "parentGroupFilter" | "noMatchingParentGroups", string>;
 
 export interface CliWorkflowDependencies {
+  entryMode?: "choose" | "ai";
   io: CliIO;
   profiles: LocalProfileRepository;
   inspectRemote(source: string): Promise<SubscriptionInspectionSummary>;
   generate(spec: GeneratorSpec): GenerationResult;
   copyScript(script: string): Promise<boolean>;
   createChildId(): string;
+  mihomoVersion?(): Promise<string | null>;
 }
 
 export type CliExitReason = "completed";
@@ -45,6 +53,7 @@ interface CollectedInitialSpec {
   catalog: LocalProfileCatalogItem[];
   targetProfileId: string;
   childSubscriptionNames: Map<string, string>;
+  savedRevision?: string;
 }
 
 const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -102,7 +111,8 @@ async function inspectWithConsent(
 async function chooseParentGroup(
   io: CliIO,
   inspection: SubscriptionInspectionSummary,
-  copy: CliMessages,
+  copy: GroupMenuMessages,
+  autoSelectSingle = true,
 ): Promise<Pick<GeneratorSpec, "parentGroupMode" | "parentGroupName">> {
   const detectedGroups = [...new Set(
     inspection.selectGroups
@@ -114,7 +124,7 @@ async function chooseParentGroup(
     io.writeLine(copy.noDetectedParentGroup);
     throw new BackRequestedError();
   }
-  if (detectedGroups.length === 1) {
+  if (detectedGroups.length === 1 && autoSelectSingle) {
     const group = detectedGroups[0]!;
     io.writeLine(copy.singleParentGroupSelected(group));
     return { parentGroupMode: "manual", parentGroupName: group };
@@ -351,6 +361,7 @@ async function collectChild(
 async function collectInitialSpec(
   dependencies: CliWorkflowDependencies,
   copy: CliMessages,
+  routingOnly = false,
 ): Promise<CollectedInitialSpec | null> {
   collectionLoop: while (true) {
     let catalog = await dependencies.profiles.list();
@@ -382,6 +393,41 @@ async function collectInitialSpec(
       } catch (error) {
         if (error instanceof BackRequestedError) return null;
         throw error;
+      }
+      if (routingOnly) {
+        const saved = await dependencies.profiles.readManagedPlan?.(target.profileId);
+        if (saved && saved.status !== "none" && saved.status !== "saved") {
+          dependencies.io.writeLine(saved.status === "read-only" ? copy.savedReadOnly : copy.savedReadFailed);
+          continue targetLoop;
+        }
+        if (saved?.status === "saved") {
+          let restored = editRoutingPlan(saved.spec, { kind: "open-saved" });
+          if (!restored.routing) {
+            try {
+              const configured = await collectAiRouting(dependencies, restored, target.profileId, copy, true);
+              if (!configured) continue targetLoop;
+              restored = configured;
+            } catch (error) {
+              if (error instanceof BackRequestedError) continue targetLoop;
+              throw error;
+            }
+          } else dependencies.io.writeLine(copy.savedLoaded);
+          return { spec: restored, catalog, targetProfileId: target.profileId, savedRevision: saved.revision,
+            childSubscriptionNames: new Map(restored.children.map(child => [child.id, child.groupName])) };
+        }
+        const spec: GeneratorSpec = {
+          targetProfile: { name: target.name, source: target.source },
+          parentGroupMode: "auto", parentGroupName: "", children: [], removedChildren: [],
+          ai: { enabled: false, mode: "existing", groupName: "AI", customDomains: [], ruleSource: "services-v1" },
+        };
+        try {
+          const routing = await collectAiRouting(dependencies, spec, target.profileId, copy, true);
+          if (!routing) continue targetLoop;
+          return { spec: routing, catalog, targetProfileId: target.profileId, childSubscriptionNames: new Map(), savedRevision: saved?.revision };
+        } catch (error) {
+          if (error instanceof BackRequestedError) continue targetLoop;
+          throw error;
+        }
       }
       while (true) {
         let parent: Pick<GeneratorSpec, "parentGroupMode" | "parentGroupName">;
@@ -425,11 +471,16 @@ function showGenerationSummary(
   language: Language,
   copy: CliMessages,
 ): void {
-  io.writeLine(copy.generatedSummary(
+  io.writeLine(result.topology.children.length === 0 && result.topology.aiEnabled
+    ? copy.aiGeneratedSummary(result.topology.targetProfileName)
+    : copy.generatedSummary(
     result.topology.targetProfileName,
     result.topology.parentGroupName,
     result.topology.children.length,
   ));
+  if (result.topology.aiEnabled && result.topology.aiGroupName) {
+    io.writeLine(copy.aiSummary(result.topology.aiGroupName, result.topology.aiOutletKind === "selected"));
+  }
   result.diagnostics
     .filter((diagnostic) => diagnostic.severity !== "success")
     .forEach((diagnostic) => io.writeLine(`[${diagnostic.severity}] ${diagnostic.message[language]}`));
@@ -442,7 +493,9 @@ function showGenerationDetails(
   copy: CliMessages,
 ): void {
   io.writeLine(copy.topology);
-  io.writeLine(`${result.topology.targetProfileName} → ${result.topology.parentGroupName}`);
+  io.writeLine(result.topology.aiEnabled && !result.topology.children.length
+    ? `${result.topology.targetProfileName}：${copy.aiSummary(result.topology.aiGroupName!, result.topology.aiOutletKind === "selected")}`
+    : `${result.topology.targetProfileName} → ${result.topology.parentGroupName}`);
   result.topology.children.forEach((child) => io.writeLine(`- ${child.groupName}`));
   io.writeLine(copy.diagnostics);
   result.diagnostics.forEach((diagnostic) => io.writeLine(`[${diagnostic.severity}] ${diagnostic.message[language]}`));
@@ -512,10 +565,12 @@ async function installCurrentScript(
   session: WorkspaceSessionState,
   targetProfileId: string,
   copy: CliMessages,
+  savedRevision?: string,
 ): Promise<DeliveryResult> {
   const result = await dependencies.profiles.installManagedScript(
     targetProfileId,
     session.generation!.fullScript,
+    ...(savedRevision ? [savedRevision] : []),
   );
   if (result.status === "written") {
     return showCompletion(dependencies.io, copy.writeCompleted(result.targetIsCurrent), copy);
@@ -528,10 +583,111 @@ async function installCurrentScript(
     dependencies.io.writeLine(copy.writeChanged);
     return "restart";
   }
-  if (result.status === "script-not-linked") dependencies.io.writeLine(copy.writeNotLinked);
+  if (result.status === "nesting-conflict") dependencies.io.writeLine(copy.writeNestingConflict);
+  else if (result.status === "script-not-linked") dependencies.io.writeLine(copy.writeNotLinked);
   else if (result.status === "custom-script-conflict") dependencies.io.writeLine(copy.writeConflict);
   else dependencies.io.writeLine(copy.writeFailed);
   return "stay";
+}
+
+async function inspectAiTarget(
+  dependencies: CliWorkflowDependencies,
+  draft: GeneratorSpec,
+  targetProfileId: string,
+  copy: CliMessages,
+): Promise<SubscriptionInspectionSummary | null> {
+  let target: LocalProfileSelection | null;
+  try {
+    target = await dependencies.profiles.select(targetProfileId);
+  } catch {
+    dependencies.io.writeLine(copy.aiUnavailable);
+    return null;
+  }
+  if (!target || target.name !== draft.targetProfile.name
+    || normalizeProfileSource(target.source) !== normalizeProfileSource(draft.targetProfile.source)
+    || target.inspection.format !== "clash-yaml") {
+    dependencies.io.writeLine(copy.aiUnavailable);
+    return null;
+  }
+  return {
+    ...target.inspection,
+    selectGroups: [...new Set([...target.inspection.selectGroups, ...draft.children.map(child => child.groupName)])]
+      .filter((name) => !name.includes(",")),
+  };
+}
+
+async function collectAiRouting(
+  dependencies: CliWorkflowDependencies,
+  draft: GeneratorSpec,
+  targetProfileId: string,
+  copy: CliMessages,
+  chooseOnly = false,
+): Promise<GeneratorSpec | null> {
+  const actions = [
+    { kind: "existing", label: copy.aiChooseExisting },
+    ...(!chooseOnly ? [{ kind: "disable", label: copy.aiDisable }] as const : []),
+    ...(!chooseOnly || dependencies.profiles.readRoutingSnapshot
+      ? [{ kind: "selected", label: copy.aiSelectNodes }] as const : []),
+  ] as const;
+  while (true) {
+    const action = actions[actions.length === 1 ? 0
+      : await dependencies.io.choose(copy.aiAction, actions.map(action => action.label))]!.kind;
+    if (action === "selected") {
+      try { return await collectSelectedNodes(dependencies, draft, targetProfileId, copy); }
+      catch (error) { if (error instanceof BackRequestedError) continue; throw error; }
+    }
+    if (action === "disable") return editRoutingPlan(draft, { kind: "disable" });
+    const inspection = await inspectAiTarget(dependencies, draft, targetProfileId, copy);
+    if (!inspection) return null;
+    while (true) {
+      let selected: Pick<GeneratorSpec, "parentGroupMode" | "parentGroupName">;
+      try {
+        selected = await chooseParentGroup(dependencies.io, inspection, {
+          ...copy,
+          parentGroupSelect: copy.aiGroupSelect,
+          parentGroupFilter: copy.aiGroupFilter,
+          noMatchingParentGroups: copy.aiNoMatchingGroups,
+          noDetectedParentGroup: copy.aiUnavailable,
+          parentGroupsTruncated: copy.aiGroupsTruncated,
+        }, false);
+      } catch (error) {
+        if (error instanceof BackRequestedError) {
+          if (chooseOnly && !dependencies.profiles.readRoutingSnapshot) throw error;
+          break;
+        }
+        throw error;
+      }
+      try {
+        if (!await dependencies.io.confirm(copy.aiConsent(selected.parentGroupName))) return null;
+      } catch (error) {
+        if (error instanceof BackRequestedError) continue;
+        throw error;
+      }
+      return editRoutingPlan(draft, { kind: "use-existing", groupName: selected.parentGroupName });
+    }
+  }
+}
+
+async function verifyAiOutlet(
+  dependencies: CliWorkflowDependencies,
+  draft: GeneratorSpec,
+  targetProfileId: string,
+  copy: CliMessages,
+): Promise<boolean> {
+  const active = draft.routing?.modules.find(module => module.enabled);
+  if (!active && !draft.ai.enabled) return true;
+  const outlet = active && draft.routing!.outlets.find(outlet => outlet.id === active.outletId);
+  if (outlet && outlet.kind === "selected") {
+    return verifySelectedNodes(dependencies, draft, targetProfileId, copy);
+  }
+  const groupName = active ? outlet?.groupName : draft.ai.groupName;
+  const inspection = await inspectAiTarget(dependencies, draft, targetProfileId, copy);
+  if (!inspection) return false;
+  if (!groupName || !inspection.selectGroups.includes(groupName)) {
+    dependencies.io.writeLine(copy.aiUnavailable);
+    return false;
+  }
+  return true;
 }
 
 async function reviewAndDeliver(
@@ -540,12 +696,20 @@ async function reviewAndDeliver(
   targetProfileId: string,
   childSubscriptionNames: ReadonlyMap<string, string>,
   copy: CliMessages,
+  savedRevision?: string,
 ): Promise<DeliveryResult> {
+  if (!await verifyAiOutlet(dependencies, session.draft, targetProfileId, copy)) return "stay";
+  if (session.generation.topology.aiEnabled) {
+    dependencies.io.writeLine(copy.aiSummary(session.generation.topology.aiGroupName!, session.generation.topology.aiOutletKind === "selected"));
+    dependencies.io.writeLine(copy.aiActivationCheck);
+  }
   const actions = ["write", "copy", "restart"] as const;
   let selected: number;
   try {
     selected = await dependencies.io.choose(
-      copy.deliveryReview(
+      session.generation.topology.aiEnabled && !session.draft.children.length
+        ? copy.aiDeliveryReview(session.draft.targetProfile.name, session.generation.topology.aiGroupName!)
+        : copy.deliveryReview(
         session.generation.topology.targetProfileName,
         session.generation.topology.parentGroupName,
         childDirections(session, childSubscriptionNames),
@@ -558,7 +722,8 @@ async function reviewAndDeliver(
   }
   const action = actions[selected]!;
   if (action === "restart") return "restart";
-  if (action === "write") return installCurrentScript(dependencies, session, targetProfileId, copy);
+  if (!await verifyAiOutlet(dependencies, session.draft, targetProfileId, copy)) return "stay";
+  if (action === "write") return installCurrentScript(dependencies, session, targetProfileId, copy, savedRevision);
   return exportCurrentScript(dependencies, session, copy);
 }
 
@@ -581,11 +746,20 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
     dependencies.io.setLanguage(language);
     dependencies.io.writeLine(copy.title);
     dependencies.io.writeLine(copy.privacy);
+    let routingOnly = dependencies.entryMode === "ai";
+    if (dependencies.entryMode === "choose") {
+      try {
+        routingOnly = await dependencies.io.choose(copy.featureSelect, [copy.nestingFeature, copy.aiFeature], copy.exit) === 1;
+      } catch (error) {
+        if (error instanceof BackRequestedError) return "completed";
+        throw error;
+      }
+    }
 
     while (true) {
       let collected: Awaited<ReturnType<typeof collectInitialSpec>>;
       try {
-        collected = await collectInitialSpec(dependencies, copy);
+        collected = await collectInitialSpec(dependencies, copy, routingOnly);
       } catch (error) {
         if (error instanceof BackRequestedError) continue languageLoop;
         throw error;
@@ -607,38 +781,44 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         if (invalidAction === 0) break;
       }
 
-      let action: number;
+      const actions = [
+        { kind: "deliver", label: copy.reviewAndDeliver },
+        ...(!routingOnly ? [
+          { kind: "add-child", label: copy.addChild },
+          { kind: "rename-child", label: copy.renameChild },
+        ] as const : []),
+        { kind: "details", label: copy.showDetails },
+        { kind: "preview", label: copy.showMaskedScript },
+        { kind: "restart", label: copy.restart },
+        { kind: "routing", label: copy.aiRouting },
+      ] as const;
+      let action: typeof actions[number]["kind"];
       try {
-        action = await dependencies.io.choose(
+        const selectedAction = await dependencies.io.choose(
           copy.previewAction,
-          [
-            copy.reviewAndDeliver,
-            copy.addChild,
-            copy.renameChild,
-            copy.showDetails,
-            copy.showMaskedScript,
-            copy.restart,
-          ],
+          actions.map(action => action.label),
           copy.exit,
         );
+        action = actions[selectedAction]!.kind;
       } catch (error) {
         if (error instanceof BackRequestedError) return "completed";
         throw error;
       }
-      if (action === 0) {
+      if (action === "deliver") {
         const deliveryResult = await reviewAndDeliver(
           dependencies,
           session,
           collected.targetProfileId,
           collected.childSubscriptionNames,
           copy,
+          collected.savedRevision,
         );
         if (deliveryResult === "completed") return "completed";
         if (deliveryResult === "restart") break;
         continue;
       }
 
-      if (action === 1) {
+      if (action === "add-child") {
         if (session.draft.children.length >= MAX_MANAGED_CHILDREN) {
           dependencies.io.writeLine(copy.childLimitReached(MAX_MANAGED_CHILDREN));
           continue;
@@ -669,7 +849,7 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         showGenerationSummary(dependencies.io, session.generation, language, copy);
         continue;
       }
-      if (action === 2) {
+      if (action === "rename-child") {
         try {
           const last = session.draft.children.at(-1)!;
           session = updateLatestChildGroup(
@@ -683,13 +863,26 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         }
         continue;
       }
-      if (action === 3) {
-        showGenerationDetails(dependencies.io, session.generation!, language, copy);
+      if (action === "details") {
+        showGenerationDetails(dependencies.io, session.generation, language, copy);
         continue;
       }
-      if (action === 4) {
+      if (action === "preview") {
         dependencies.io.writeLine(copy.maskedPreview);
-        dependencies.io.writeLine(session.generation!.maskedScript);
+        dependencies.io.writeLine(session.generation.maskedScript);
+        continue;
+      }
+      if (action === "routing") {
+        try {
+          const nextAi = await collectAiRouting(dependencies, session.draft, collected.targetProfileId, copy);
+          if (nextAi) {
+            session = updateWorkspaceSession(session, () => nextAi, dependencies.generate);
+            showGenerationSummary(dependencies.io, session.generation, language, copy);
+            if (!session.generation.topology.aiEnabled) dependencies.io.writeLine(copy.aiDisabled);
+          }
+        } catch (error) {
+          if (!(error instanceof BackRequestedError)) throw error;
+        }
         continue;
       }
       break;

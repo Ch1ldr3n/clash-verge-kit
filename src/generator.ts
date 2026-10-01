@@ -11,6 +11,10 @@ import {
   MAX_MANAGED_CHILDREN,
   redactManagedSpec,
 } from "./script-import.ts";
+import { normalizeManagedSpec } from "./script-import.ts";
+import { buildRoutingRuntime } from "./routing-runtime.ts";
+import { ROUTING_REVISION } from "./routing-plan.ts";
+import type { RoutingRevision } from "./routing-plan.ts";
 
 const AI_RULESET_URL =
   "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.mrs";
@@ -825,7 +829,8 @@ function buildRuntimeSettings(spec: GeneratorSpec, diagnostics: Diagnostic[]): R
       )
     : "";
 
-  if (!spec.children.length && !spec.removedChildren?.length) {
+  if (!spec.routing && !spec.children.length && !spec.removedChildren?.length
+    && !(spec.ai.enabled && spec.ai.mode === "existing" && spec.ai.ruleSource === "services-v1")) {
     diagnostics.push(
       diagnostic("child-required", "error", "至少需要一个子订阅。", "At least one nested subscription is required.", "children"),
     );
@@ -1006,6 +1011,10 @@ function buildRuntimeSettings(spec: GeneratorSpec, diagnostics: Diagnostic[]): R
   const aiGroupName = spec.ai.enabled
     ? validateGroupName(spec.ai.groupName, "ai.groupName", diagnostics, "AI 代理组名称", "AI group name")
     : spec.ai.groupName.trim();
+  if (spec.ai.ruleSource !== undefined
+    && (spec.ai.ruleSource !== "services-v1" || spec.ai.mode !== "existing")) {
+    diagnostics.push(diagnostic("ai-source-invalid", "error", "AI 规则或出口方式不受支持。", "Unsupported AI rules or outlet mode."));
+  }
   if (spec.ai.enabled && spec.ai.mode === "create") {
     if (aiGroupName === parentGroupName) {
       diagnostics.push(
@@ -1096,8 +1105,90 @@ function maskedSettings(settings: RuntimeSettings): RuntimeSettings {
   };
 }
 
-export function generateClashVergeScript(spec: GeneratorSpec): GenerationResult {
+function buildDeliveryScript(settings: RuntimeSettings, block: string, source: GeneratorSpec["ai"]["ruleSource"]): string {
+  if (source !== "services-v1" || !settings.ai.enabled) return buildRuntimeScript(settings, block);
+  const nesting = settings.children.length || settings.removedChildren.length
+    ? buildRuntimeScript({ ...settings, ai: { ...settings.ai, enabled: false } }, block)
+      .replace("function main(config, profileName)", "function applyNesting(config, profileName)")
+    : block;
+  const providers = ["openai", "anthropic", "google-deepmind"].map((name) => ({
+    key: `clash_verge_kit_ai_${name.replace(/-/g, "_")}`,
+    value: { type: "http", behavior: "domain", format: "text",
+      url: `https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/${name}.list`,
+      path: `./rule_provider/clash-verge-kit/${name}.list`, interval: 86400 },
+  }));
+  return `${nesting}
+/* AI service rules; no file or network I/O. */
+const AI_DELIVERY = ${serializeForScript({ target: settings.targetProfileName, group: settings.ai.groupName, providers, domains: settings.ai.customDomains })};
+function main(config, profileName) {
+  if (profileName !== AI_DELIVERY.target) return config;
+  if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("配置对象无效。");
+  const output = JSON.parse(JSON.stringify(config));
+  ${settings.children.length || settings.removedChildren.length ? "applyNesting(output, profileName);" : ""}
+  const groups = Array.isArray(output["proxy-groups"]) ? output["proxy-groups"] : [];
+  const selected = groups.filter(function (group) { return group && group.name === AI_DELIVERY.group; });
+  if (selected.length !== 1 || selected[0].type !== "select") throw new Error("AI 出口组不存在或不受支持。");
+  const active = new Set();
+  const checked = new Set();
+  const nodes = Array.isArray(output.proxies) ? output.proxies : [];
+  const nodeProviders = output["proxy-providers"] || {};
+  function checkGroup(group) {
+    if (active.has(group.name)) throw new Error("AI 出口存在循环引用。");
+    if (checked.has(group.name)) return;
+    active.add(group.name);
+    (Array.isArray(group.use) ? group.use : []).forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(nodeProviders, key)) throw new Error("AI 出口引用的节点来源不存在。");
+    });
+    (Array.isArray(group.proxies) ? group.proxies : []).forEach(function (name) {
+      if (["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE"].indexOf(name) >= 0) return;
+      const matches = groups.filter(function (candidate) { return candidate && candidate.name === name; });
+      const matchingNodes = nodes.filter(function (node) { return node && node.name === name; });
+      if (matches.length + matchingNodes.length !== 1) throw new Error("AI 出口引用的节点或组不存在或重名。");
+      if (matches.length) checkGroup(matches[0]);
+    });
+    active.delete(group.name);
+    checked.add(group.name);
+  }
+  checkGroup(selected[0]);
+  const rules = Array.isArray(output.rules) ? output.rules : [];
+  const existing = output["rule-providers"] || {};
+  AI_DELIVERY.providers.forEach(function (entry) {
+    if (Object.prototype.hasOwnProperty.call(existing, entry.key) && JSON.stringify(existing[entry.key]) !== JSON.stringify(entry.value)) {
+      throw new Error("AI 规则名称冲突，已保留原配置。");
+    }
+  });
+  const additions = AI_DELIVERY.domains.map(function (domain) { return "DOMAIN-SUFFIX," + domain + "," + AI_DELIVERY.group; });
+  AI_DELIVERY.providers.forEach(function (entry) {
+    existing[entry.key] = entry.value;
+    additions.push("RULE-SET," + entry.key + "," + AI_DELIVERY.group);
+  });
+  output["rule-providers"] = existing;
+  output.rules = additions.concat(rules.filter(function (rule) { return additions.indexOf(rule) < 0; }));
+  return output;
+}`;
+}
+
+function composeDeliveryScript(spec: GeneratorSpec, settings: RuntimeSettings, revision: RoutingRevision): string {
+  const managementBlock = createManagementMetadataBlock(spec, revision);
+  if (!spec.routing) return buildDeliveryScript(settings, managementBlock, spec.ai.ruleSource);
+
+  const hasNesting = Boolean(settings.children.length || settings.removedChildren.length);
+  const prelude = hasNesting
+    ? buildRuntimeScript(settings, managementBlock)
+      .replace("function main(config, profileName)", "function applyNesting(config, profileName)")
+    : managementBlock;
+  return buildRoutingRuntime(spec.routing, settings.targetProfileName, prelude, hasNesting,
+    spec.targetProfile.source, revision);
+}
+
+export function generateClashVergeScript(spec: GeneratorSpec,
+  options: { routingRevision?: RoutingRevision } = {}): GenerationResult {
   const diagnostics: Diagnostic[] = [];
+  if (spec.routing) {
+    const normalized = normalizeManagedSpec(spec);
+    if (normalized) spec = normalized;
+    else diagnostics.push(diagnostic("invalid-routing-plan", "error", "分流方案无效。", "Invalid routing plan."));
+  }
   const settings = buildRuntimeSettings(spec, diagnostics);
   const topology: TopologySummary = {
     targetProfileName: settings.targetProfileName,
@@ -1114,6 +1205,13 @@ export function generateClashVergeScript(spec: GeneratorSpec): GenerationResult 
     aiEnabled: settings.ai.enabled,
     aiGroupName: settings.ai.enabled ? settings.ai.groupName : undefined,
   };
+  if (spec.routing && !diagnostics.some(item => item.severity === "error")) {
+    const module = spec.routing.modules.find(item => item.enabled);
+    topology.aiEnabled = Boolean(module);
+    const outlet = module ? spec.routing.outlets.find(item => item.id === module.outletId) : undefined;
+    topology.aiGroupName = outlet?.groupName;
+    topology.aiOutletKind = outlet?.kind;
+  }
 
   const operation = settings.removedChildren.length
     ? settings.children.length ? "update" : "restore"
@@ -1143,11 +1241,8 @@ export function generateClashVergeScript(spec: GeneratorSpec): GenerationResult 
   return {
     valid,
     operation,
-    fullScript: buildRuntimeScript(settings, createManagementMetadataBlock(spec)),
-    maskedScript: buildRuntimeScript(
-      maskedSettings(settings),
-      createManagementMetadataBlock(redactManagedSpec(spec)),
-    ),
+    fullScript: composeDeliveryScript(spec, settings, options.routingRevision ?? ROUTING_REVISION),
+    maskedScript: composeDeliveryScript(redactManagedSpec(spec), maskedSettings(settings), options.routingRevision ?? ROUTING_REVISION),
     diagnostics,
     topology,
   };

@@ -9,6 +9,7 @@ import { createLocalProfileRepository } from "./local-profile-repository.ts";
 import { readRemoteProfile } from "./remote-profile-reader.ts";
 import { generateClashVergeScript } from "../src/generator.ts";
 import type { Language } from "../src/types.ts";
+import { readMihomoVersion } from "./mihomo-capability.ts";
 
 const terminalIo = createReadlineCliIO();
 let selectedLanguage: Language | null = null;
@@ -22,12 +23,14 @@ const io: CliIO = {
 
 try {
   await runCliWorkflow({
+    entryMode: "choose",
     io,
     profiles: createLocalProfileRepository(),
     inspectRemote: readRemoteProfile,
     generate: generateClashVergeScript,
     copyScript: copyTextToClipboard,
     createChildId: randomUUID,
+    mihomoVersion: readMihomoVersion,
   });
 } catch (error) {
   if (!(error instanceof UserCancelledError)) {

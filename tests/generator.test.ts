@@ -68,6 +68,51 @@ function twoChildSpec(overrides: Partial<GeneratorSpec> = {}): GeneratorSpec {
 }
 
 describe("Clash Verge extension script generator", () => {
+  it.each(["missing-node", "cycle", "missing-provider"])("rejects an AI outlet with %s without changing input", (fault) => {
+    const generated = generateClashVergeScript(baseSpec({
+      parentGroupMode: "auto", parentGroupName: "", children: [],
+      ai: { enabled: true, mode: "existing", groupName: "出口", customDomains: [], ruleSource: "services-v1" },
+    }));
+    const input = { "proxy-groups": [fault === "missing-provider"
+      ? { name: "出口", type: "select", use: ["missing"] }
+      : { name: "出口", type: "select", proxies: [fault === "cycle" ? "出口" : "missing"] }], rules: ["MATCH,DIRECT"] };
+    const before = structuredClone(input);
+    expect(() => execute(generated.fullScript, input)).toThrow();
+    expect(input).toEqual(before);
+  });
+
+  it("generates AI routing without nesting and preserves original groups and rules", () => {
+    const generated = generateClashVergeScript(baseSpec({
+      parentGroupMode: "auto", parentGroupName: "", children: [],
+      ai: { enabled: true, mode: "existing", groupName: "出口", customDomains: [], ruleSource: "services-v1" } as GeneratorSpec["ai"],
+    }));
+    expect(generated.valid).toBe(true);
+    const input = {
+      proxies: [{ name: "node", type: "ss" }],
+      "proxy-groups": [{ name: "出口", type: "select", proxies: ["node", "DIRECT"] }],
+      rules: ["DOMAIN-SUFFIX,openai.com,DIRECT", "MATCH,DIRECT"],
+      dns: { enable: true },
+    };
+    const before = structuredClone(input);
+    const output = execute(generated.fullScript, input);
+    expect(output["proxy-groups"]).toEqual(before["proxy-groups"]);
+    expect(output.proxies).toEqual(before.proxies);
+    expect(output.dns).toEqual(before.dns);
+    expect(output.rules).toEqual([
+      "RULE-SET,clash_verge_kit_ai_openai,出口",
+      "RULE-SET,clash_verge_kit_ai_anthropic,出口",
+      "RULE-SET,clash_verge_kit_ai_google_deepmind,出口",
+      ...before.rules,
+    ]);
+    expect(Object.values(output["rule-providers"] as Record<string, unknown>)).toEqual([
+      expect.objectContaining({ type: "http", behavior: "domain", format: "text", url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/openai.list" }),
+      expect.objectContaining({ url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/anthropic.list" }),
+      expect.objectContaining({ url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/google-deepmind.list" }),
+    ]);
+    expect(execute(generated.fullScript, output)).toEqual(output);
+    expect(input).toEqual(before);
+  });
+
   it("generates one HTTP provider, a dedicated group, and a masked preview", () => {
     const generated = generateClashVergeScript(baseSpec());
     expect(generated.valid).toBe(true);

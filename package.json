@@ -27,11 +27,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:mihomo": "node scripts/test-mihomo.mjs",
+    "test:routing": "node scripts/probe-ai-delivery.mjs && node scripts/probe-routing-generated.mjs && node scripts/probe-routing-cache-isolation.mjs && node scripts/probe-routing-empty.mjs",
     "verify:privacy": "node scripts/verify-build.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "verify:package-install": "node scripts/verify-package-install.mjs",
     "check": "npm run test && npm run build:cli && npm run verify:privacy && npm run verify:package",
-    "check:release": "npm run check && npm run verify:package-install"
+    "check:release": "npm run check && npm run verify:package-install",
+    "check:acceptance": "npm run check:release && npm run test:routing"
   },
   "dependencies": {
     "yaml": "2.9.0"

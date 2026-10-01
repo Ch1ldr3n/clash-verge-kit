@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 import vm from "node:vm";
@@ -18,7 +18,10 @@ import {
   inspectProfileYaml,
   type ProfileYamlInspection,
 } from "./profile-yaml.ts";
-import { classifyManagedScript } from "../src/managed-script-integrity.ts";
+import { inspectManagedScript } from "../src/managed-script-integrity.ts";
+import { deriveNodePrefix } from "../src/generator.ts";
+import type { GeneratorSpec, RoutingSubscriptionSource } from "../src/types.ts";
+import { inspectLocalRoutingNodes, readBoundedYaml, type RoutingNodeInspection } from "./routing-node-inspection.ts";
 
 const MAX_SCRIPT_BYTES = 2 * 1024 * 1024;
 const MAX_PROFILE_INDEX_BYTES = 5 * 1024 * 1024;
@@ -50,7 +53,25 @@ export interface LocalProfileRepository {
   select(profileId: string): Promise<LocalProfileSelection | null>;
   findBySource(source: string): Promise<LocalProfileSelection | null>;
   addProfileLocation?(input: string): Promise<ProfileLocationAddResult>;
-  installManagedScript(profileId: string, script: string): Promise<ManagedScriptInstallResult>;
+  readManagedPlan?(profileId: string): Promise<ManagedPlanReadResult>;
+  readRoutingSnapshot?(lookup: { profileId: string } | { source: string }, sourceId: string): Promise<RoutingSnapshot | null>;
+  installManagedScript(profileId: string, script: string, expectedRevision?: string): Promise<ManagedScriptInstallResult>;
+}
+
+export interface RoutingSnapshot {
+  name: string;
+  source: string;
+  description: RoutingSubscriptionSource | null;
+  inspection: RoutingNodeInspection;
+}
+
+export type ManagedPlanReadResult =
+  | { status: "saved"; spec: GeneratorSpec; revision: string }
+  | { status: "none"; revision?: string }
+  | { status: "read-only" | "read-failed" | "target-missing" };
+
+function scriptRevision(index: string, file: string, script: string): string {
+  return createHash("sha256").update(JSON.stringify([index, file, script])).digest("hex");
 }
 
 export type ProfileLocationAddResult =
@@ -58,6 +79,7 @@ export type ProfileLocationAddResult =
   | { status: "not-found" };
 
 export type ManagedScriptInstallResult =
+  | { status: "nesting-conflict" }
   | { status: "written"; targetIsCurrent: boolean }
   | { status: "target-missing" }
   | { status: "script-not-linked" }
@@ -353,8 +375,67 @@ export function createLocalProfileRepository(
       }
       return { status: "not-found" };
     },
-    async installManagedScript(profileId, script) {
-      if (classifyManagedScript(script) !== "current-readable") return { status: "invalid-script" };
+    async readRoutingSnapshot(lookup, sourceId) {
+      const profiles = await loadProfiles();
+      if (!profiles.filePath) throw new Error("unreadable-profile-index");
+      const profile = "profileId" in lookup ? profiles.profilesById.get(lookup.profileId)
+        : profiles.profilesBySource.get(normalizeProfileSource(lookup.source) ?? "");
+      if (!profile) return null;
+      const identity = { name: profile.name, source: profile.source };
+      try {
+        if (!profile.profileFilePath) throw new Error("missing-snapshot");
+        const directory = path.dirname(profiles.filePath);
+        const root = await readBoundedYaml(profile.profileFilePath, directory);
+        const providers: NonNullable<RoutingSubscriptionSource["providers"]> = [];
+        for (const [key, raw] of Object.entries(root["proxy-providers"] ?? {})) {
+          if (!isRecord(raw) || (raw.type !== "file" && raw.type !== "http")) continue;
+          // Child groups are not imported. Transport overrides and custom download
+          // policies need their own source mapping, so do not silently discard them.
+          if (raw.proxy || raw.header || (isRecord(raw.override)
+            && Object.keys(raw.override).some(key => !["additional-prefix", "additional-suffix", "proxy-name"].includes(key)))) continue;
+          const source = raw.type === "http" ? raw.url : typeof raw.path === "string"
+            ? "./" + path.relative(directory, path.resolve(directory, raw.path)).replace(/\\/g, "/") : null;
+          if (typeof source !== "string" || source.includes("../")) continue;
+          providers.push({ id: key, mode: raw.type, source, interval: typeof raw.interval === "number" ? raw.interval : 3600 });
+        }
+        return { ...identity,
+          description: { id: sourceId, kind: "subscription", ...identity, mode: "http", providers },
+          inspection: await inspectLocalRoutingNodes(root, directory) };
+      } catch {
+        return { ...identity, description: null,
+          inspection: { status: "failed", nodes: [], failures: [{ provider: null, reason: "unreadable" }] } };
+      }
+    },
+    async readManagedPlan(profileId) {
+      try {
+        const cached = await loadProfiles();
+        const selected = cached.profilesById.get(profileId);
+        if (!selected || !cached.filePath) return { status: "target-missing" };
+        const index = await readFile(cached.filePath, "utf8");
+        const live = buildCachedProfiles(cached.filePath, cached.mtimeMs, index, cached);
+        const target = live.profilesBySource.get(selected.source);
+        if (!target || target.name !== selected.name) return { status: "target-missing" };
+        if (!target.scriptUid) return { status: "none" };
+        if (!target.scriptFilePath || !await isSafeLinkedScriptPath(cached.filePath, target.scriptFilePath)) return { status: "read-failed" };
+        const snapshot = await readScriptSnapshot(target.scriptFilePath);
+        if (snapshot.status !== "ok") return { status: "read-failed" };
+        const revision = scriptRevision(index, target.scriptFilePath, snapshot.content);
+        if (!snapshot.content.trim() || isOfficialDefaultScript(snapshot.content)) return { status: "none", revision };
+        const inspected = inspectManagedScript(snapshot.content);
+        if (inspected.authenticity === "invalid") return { status: "read-only" };
+        const spec = inspected.parsedSpec;
+        if (spec.targetProfile.name !== target.name
+          || normalizeProfileSource(spec.targetProfile.source) !== target.source
+          || (spec.ai.enabled && spec.ai.mode === "create")) return { status: "read-only" };
+        return { status: "saved", spec, revision };
+      } catch {
+        return { status: "read-failed" };
+      }
+    },
+    async installManagedScript(profileId, script, expectedRevision) {
+      const inspected = inspectManagedScript(script);
+      if (inspected.authenticity !== "current-readable") return { status: "invalid-script" };
+      const incoming = inspected.parsedSpec;
       try {
         new vm.Script(script);
       } catch {
@@ -370,6 +451,10 @@ export function createLocalProfileRepository(
         const live = buildCachedProfiles(cached.filePath, cached.mtimeMs, profilesSource, cached);
         const target = live.profilesBySource.get(selected.source);
         if (!target) return { status: "target-missing" };
+        if (incoming.targetProfile.name !== target.name
+          || normalizeProfileSource(incoming.targetProfile.source) !== target.source) {
+          return { status: "invalid-script" };
+        }
         if (!target.scriptUid) return { status: "script-not-linked" };
         if (!target.scriptFilePath) return { status: "unsafe-script-path" };
         if (!await isSafeLinkedScriptPath(cached.filePath, target.scriptFilePath)) {
@@ -378,10 +463,35 @@ export function createLocalProfileRepository(
 
         const existing = await readScriptSnapshot(target.scriptFilePath);
         if (existing.status === "unsafe") return { status: "unsafe-script-path" };
+        if (expectedRevision !== undefined
+          && expectedRevision !== scriptRevision(profilesSource, target.scriptFilePath, existing.content)) return { status: "concurrent-change" };
+        const existingPlan = inspectManagedScript(existing.content);
+        const previous = existingPlan.parsedSpec;
+        // Preserve conflict precedence for readable metadata before rejecting a
+        // modified body; parsed settings alone never authorize an overwrite.
+        if (previous && (previous.targetProfile.name !== target.name
+          || normalizeProfileSource(previous.targetProfile.source) !== target.source
+          || (previous.routing && !incoming.routing))) return { status: "custom-script-conflict" };
+        if (incoming.routing || incoming.ai.ruleSource === "services-v1") {
+          if (previous && (previous.children.length || previous.removedChildren?.length)) {
+            const childIdentity = (child: typeof incoming.children[number]) => JSON.stringify([
+              child.mode, normalizeProfileSource(child.source) ?? child.source, child.groupName,
+              child.nodePrefix?.trim() || deriveNodePrefix(child.groupName),
+            ]);
+            const retained = new Set(incoming.children.map(childIdentity));
+            const removed = new Set((incoming.removedChildren ?? []).map((child) => JSON.stringify(child)));
+            if (previous.parentGroupMode !== incoming.parentGroupMode
+              || previous.parentGroupName !== incoming.parentGroupName
+              || previous.children.some((child) => !retained.has(childIdentity(child)))
+              || (previous.removedChildren ?? []).some((child) => !removed.has(JSON.stringify(child)))) {
+              return { status: "nesting-conflict" };
+            }
+          }
+        }
         if (
           existing.content.trim()
           && !isOfficialDefaultScript(existing.content)
-          && classifyManagedScript(existing.content) === "invalid"
+          && existingPlan.authenticity === "invalid"
         ) {
           return { status: "custom-script-conflict" };
         }
@@ -398,6 +508,20 @@ export function createLocalProfileRepository(
           return { status: "concurrent-change" };
         }
 
+        if (incoming.routing && existing.content !== script) {
+          const hash = createHash("sha256").update(existing.content).digest("hex").slice(0, 16);
+          const backupPath = `${target.scriptFilePath}.kit-backup-${hash}`;
+          try {
+            await writeFile(backupPath, existing.content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+          } catch {
+            const backup = await readScriptSnapshot(backupPath);
+            if (backup.status !== "ok" || backup.content !== existing.content) return { status: "write-failed" };
+          }
+          const finalSnapshot = await readScriptSnapshot(target.scriptFilePath);
+          if (await readFile(cached.filePath, "utf8") !== profilesSource || finalSnapshot.status !== "ok"
+            || finalSnapshot.content !== existing.content
+            || !await isSafeLinkedScriptPath(cached.filePath, target.scriptFilePath)) return { status: "concurrent-change" };
+        }
         await writeFile(target.scriptFilePath, script, "utf8");
         return { status: "written", targetIsCurrent: target.isCurrent };
       } catch {
