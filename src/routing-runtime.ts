@@ -1,5 +1,7 @@
 import type { RoutingPlan } from "./types";
 import { sha256Hex } from "./integrity.ts";
+import { LEGACY_ROUTING_REVISION } from "./routing-plan.ts";
+import type { RoutingRevision } from "./routing-plan.ts";
 
 // Match only the fixed providers/rules emitted by the authenticated V1/V2 plan.
 function legacyRemoval(plan: RoutingPlan) {
@@ -22,17 +24,28 @@ function legacyRemoval(plan: RoutingPlan) {
 
 // A revision's template is part of the saved-script format. Preserve its bytes
 // when introducing a later revision so full-script authentication stays valid.
-export function buildRoutingRuntime(plan: RoutingPlan, target: string, prelude: string, hasNesting: boolean): string {
+export function buildRoutingRuntime(plan: RoutingPlan, target: string, prelude: string, hasNesting: boolean,
+  targetSource: string, revision: RoutingRevision): string {
   const identities = new Map<string, string>();
   for (const outlet of plan.outlets) if (outlet.kind === "selected") {
     for (const node of outlet.nodes) if (node.provider !== null || plan.sources.find(source => source.id === node.sourceId)?.kind === "subscription") {
       const identity = JSON.stringify([node.sourceId, node.provider]);
-      identities.set(identity, sha256Hex(identity).slice(0, 24));
+      if (revision === LEGACY_ROUTING_REVISION) {
+        identities.set(identity, sha256Hex(identity).slice(0, 24));
+      } else {
+        const source = plan.sources.find(item => item.id === node.sourceId)!;
+        const provider = source.kind === "subscription" && node.provider !== null
+          ? source.providers?.find(item => item.id === node.provider) : null;
+        const scope = JSON.stringify([revision, target, targetSource, source.kind, source.id,
+          source.kind === "subscription" ? [source.mode, source.source] : null,
+          provider ? [provider.mode, provider.source] : null, node.provider]);
+        identities.set(identity, sha256Hex(scope).slice(0, 24));
+      }
     }
   }
   const settings = JSON.stringify({ target, plan, aliases: Object.fromEntries(identities), legacy: legacyRemoval(plan) }, null, 2).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
   return `${prelude}
-/* Routing V1; no file or network I/O. */
+/* Routing ${revision === LEGACY_ROUTING_REVISION ? "V1" : "V2"}; no file or network I/O. */
 const ROUTING = ${settings};
 function main(config, profileName) {
   if (profileName !== ROUTING.target) return config;

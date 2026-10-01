@@ -10,6 +10,8 @@ import { BackRequestedError, type CliIO } from "../scripts/cli-io";
 import { generateClashVergeScript } from "../src/generator";
 import { parseManagedScript } from "../src/script-import";
 import type { GeneratorSpec } from "../src/types";
+import { verifySelectedNodes } from "../scripts/cli-routing-nodes.ts";
+import { getCliMessages } from "../scripts/cli-messages.ts";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -55,6 +57,31 @@ function input(steps: Array<number | string | boolean>): CliIO & { output: strin
     async ask() { const step = steps.shift(); if (step === "back") throw new BackRequestedError(); if (typeof step !== "string") throw new Error("Expected input"); return step; },
   };
 }
+
+it("allows a readable target without its own nodes to use child-only selections", async () => {
+  const { repository, root } = await fixture();
+  const indexPath = path.join(root, "profiles.yaml");
+  const { parse } = await import("yaml");
+  const index = parse(await readFile(indexPath, "utf8"));
+  const source = "https://child.example.test/only";
+  index.items.push({ uid: "child", type: "remote", name: "Child", url: source, file: "child.yaml" });
+  await writeFile(indexPath, stringify(index));
+  await writeFile(path.join(root, "profiles", "p1.yaml"), stringify({
+    "proxy-groups": [{ name: "PROXY", type: "select", proxies: ["DIRECT"] }], rules: ["MATCH,PROXY"],
+  }));
+  await writeFile(path.join(root, "profiles", "child.yaml"), "proxies: [{name: Available, type: http}]\n");
+  const spec = savedSpec();
+  spec.routing!.sources.push({ id: "child", kind: "subscription", name: "Child", mode: "http", source });
+  spec.routing!.outlets = [{ id: "outlet", kind: "selected", groupName: "Chosen",
+    nodes: [{ sourceId: "child", provider: null, name: "Available" }] }];
+  const target = (await repository.list()).find(item => item.name === "Main")!;
+  const deps = { io: input([]), profiles: repository, generate: generateClashVergeScript,
+    createChildId: () => "child", mihomoVersion: async () => "1.19.31", copyScript: async () => true,
+    inspectRemote: async () => { throw new Error("no network"); } };
+  expect(await verifySelectedNodes(deps, spec, target.id, getCliMessages("en"))).toBe(true);
+  await writeFile(path.join(root, "profiles", "p1.yaml"), "[unreadable yaml");
+  expect(await verifySelectedNodes(deps, spec, target.id, getCliMessages("en"))).toBe(false);
+});
 
 it("reopens, changes, writes and disables a saved plan through the real local repository", async () => {
   const { repository, scriptPath } = await fixture();

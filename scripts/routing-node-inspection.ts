@@ -19,7 +19,7 @@ export async function readBoundedYaml(file: string, directory: string): Promise<
   return root as Record<string, unknown>;
 }
 
-export async function inspectLocalRoutingNodes(file: string | undefined, directory: string): Promise<RoutingNodeInspection> {
+export async function inspectLocalRoutingNodes(root: Record<string, unknown>, directory: string): Promise<RoutingNodeInspection> {
   const nodes: RoutingNodeInspection["nodes"] = [];
   const failures: RoutingNodeInspection["failures"] = [];
   function collect(value: unknown, provider: string | null) {
@@ -32,8 +32,6 @@ export async function inspectLocalRoutingNodes(file: string | undefined, directo
       .map(name => ({ provider, name })));
   }
   try {
-    if (!file) throw new Error("missing-snapshot");
-    const root = await readBoundedYaml(file, directory);
     if (!Array.isArray(root.proxies) && (!root["proxy-providers"] || typeof root["proxy-providers"] !== "object")) throw new Error("unsupported-snapshot");
     collect(root.proxies ?? [], null);
     const providers = root["proxy-providers"] ?? {};

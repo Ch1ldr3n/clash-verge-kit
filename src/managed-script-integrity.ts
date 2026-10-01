@@ -73,7 +73,8 @@ export function inspectManagedScript(script: string): ManagedScriptInspection {
   const imported = parseManagedScript(script);
   if (!imported.ok) return { authenticity: "invalid", parsedSpec: null };
   const parsedSpec = imported.spec;
-  const generated = generateClashVergeScript(imported.spec);
+  const generated = generateClashVergeScript(imported.spec,
+    imported.generatorRevision ? { routingRevision: imported.generatorRevision } : {});
   if (!generated.valid) return { authenticity: "invalid", parsedSpec };
   if (script === generated.fullScript) return { authenticity: "current-readable", parsedSpec };
   return {

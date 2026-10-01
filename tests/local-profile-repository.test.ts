@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createLocalProfileRepository } from "../scripts/local-profile-repository";
 import { generateClashVergeScript } from "../src/generator";
 import { parseManagedScript } from "../src/script-import";
+import { inspectRoutingSources } from "../scripts/routing-source-catalog.ts";
 import type { GeneratorSpec } from "../src/types";
 
 const temporaryRoots: string[] = [];
@@ -439,10 +440,52 @@ it("inspects only node identities from safe static and provider snapshots, disti
   await writeFile(path.join(directory, "cached.yaml"), "proxies:\n  - name: same[1]\n    type: http\n    password: private-node-secret\n");
   await writeFile(path.join(directory, "profiles", "example.yaml"), "proxies:\n  - name: static+node\nproxy-providers:\n  a:\n    type: file\n    path: ./cached.yaml\n    override:\n      additional-prefix: Existing\n  b:\n    type: http\n    url: https://provider.example.test/secret\n    path: ./missing-cache.yaml\n");
   const repository = createLocalProfileRepository({ profileFileCandidates: () => [fixture.profilesFile] });
-  const nodes = await repository.inspectRoutingNodes!((await repository.list())[0]!.id);
+  const snapshot = await repository.readRoutingSnapshot!({ profileId: (await repository.list())[0]!.id }, "child");
+  const nodes = snapshot!.inspection;
   expect(nodes).toMatchObject({ status: "partial", nodes: [
     { provider: null, name: "static+node" }, { provider: "a", name: "same[1]" },
   ], failures: [{ provider: "b", reason: "unreadable" }] });
   expect(JSON.stringify(nodes)).not.toContain("private-node-secret");
   expect(JSON.stringify(nodes)).not.toContain("https://provider.example.test/secret");
+  expect(snapshot!.description?.providers).toEqual([
+    { id: "a", mode: "file", source: "./cached.yaml", interval: 3600 },
+    { id: "b", mode: "http", source: "https://provider.example.test/secret", interval: 3600 },
+  ]);
+});
+
+it("refreshes routing snapshots and keeps readable target nodes separate from copyable child providers", async () => {
+  const fixture = await createProfileFixture();
+  const profileFile = path.join(path.dirname(fixture.profilesFile), "profiles", "example.yaml");
+  const repository = createLocalProfileRepository({ profileFileCandidates: () => [fixture.profilesFile] });
+  const target = (await repository.list())[0]!;
+  await writeFile(profileFile, "proxies: []\nproxy-providers:\n  special:\n    type: http\n    url: https://provider.example.test/one\n    header: {X-Custom: [synthetic]}\n    payload: [{name: readable}]\n");
+  const snapshot = await repository.readRoutingSnapshot!({ profileId: target.id }, "target");
+  expect(snapshot!.inspection).toEqual({ status: "available", nodes: [{ provider: "special", name: "readable" }], failures: [] });
+  expect(snapshot!.description?.providers).toEqual([]);
+
+  await writeFile(profileFile, "proxies: [{name: new-static}]\nproxy-providers:\n  regular:\n    type: http\n    url: https://provider.example.test/two\n    payload: [{name: new-provider}]\n");
+  const refreshed = await repository.readRoutingSnapshot!({ source: snapshot!.source }, "child");
+  expect(refreshed!.inspection.nodes).toEqual([{ provider: null, name: "new-static" }, { provider: "regular", name: "new-provider" }]);
+  expect(refreshed!.description?.providers).toEqual([{ id: "regular", mode: "http", source: "https://provider.example.test/two", interval: 3600 }]);
+  expect(snapshot!.inspection.nodes).toEqual([{ provider: "special", name: "readable" }]);
+
+  await writeFile(profileFile, "[invalid yaml");
+  expect(await repository.readRoutingSnapshot!({ profileId: target.id }, "target")).toMatchObject({
+    description: null, inspection: { status: "failed", nodes: [], failures: [{ provider: null, reason: "unreadable" }] },
+  });
+  expect(await repository.readRoutingSnapshot!({ profileId: "missing" }, "target")).toBeNull();
+});
+
+it("reports an unreadable profile index as unknown rather than missing routing nodes", async () => {
+  const fixture = await createProfileFixture();
+  const repository = createLocalProfileRepository({ profileFileCandidates: () => [fixture.profilesFile] });
+  const target = (await repository.list())[0]!;
+  const parsed = parseManagedScript(generatedScript());
+  if (!parsed.ok) throw new Error("invalid fixture");
+  const source = await readFile(fixture.profilesFile, "utf8");
+  await writeFile(fixture.profilesFile, "[invalid index");
+  const result = await inspectRoutingSources(repository, parsed.spec, target.id, "delivery");
+  expect(result.unknown).toEqual([{ sourceId: "target", provider: null }]);
+  await writeFile(fixture.profilesFile, source);
+  expect((await inspectRoutingSources(repository, parsed.spec, target.id, "delivery")).unknown).toEqual([]);
 });

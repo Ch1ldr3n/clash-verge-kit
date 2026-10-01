@@ -1,6 +1,7 @@
 import { sha256Hex } from "./integrity.ts";
 import type { GeneratorSpec, RemovedChildSubscription } from "./types";
-import { exactKeys, normalizeRoutingPlan, ROUTING_REVISION } from "./routing-plan.ts";
+import { exactKeys, normalizeRoutingPlan, LEGACY_ROUTING_REVISION, ROUTING_REVISION } from "./routing-plan.ts";
+import type { RoutingRevision } from "./routing-plan.ts";
 
 const MAX_SCRIPT_BYTES = 2 * 1024 * 1024;
 export const MAX_MANAGED_CHILDREN = 64;
@@ -22,7 +23,7 @@ export type ScriptImportErrorCode =
   | "schema-invalid";
 
 export type ScriptImportResult =
-  | { ok: true; spec: GeneratorSpec }
+  | { ok: true; spec: GeneratorSpec; generatorRevision?: RoutingRevision }
   | { ok: false; error: { code: ScriptImportErrorCode } };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -180,19 +181,19 @@ function decodeBase64Url(value: string): string | null {
   }
 }
 
-function checksumPayload(spec: GeneratorSpec): string {
+function checksumPayload(spec: GeneratorSpec, revision: RoutingRevision = ROUTING_REVISION): string {
   return JSON.stringify({ schema: METADATA_SCHEMA, version: metadataVersion(spec),
-    ...(spec.routing ? { generatorRevision: ROUTING_REVISION } : {}), spec });
+    ...(spec.routing ? { generatorRevision: revision } : {}), spec });
 }
 
-export function createManagementMetadataBlock(spec: GeneratorSpec): string {
+export function createManagementMetadataBlock(spec: GeneratorSpec, revision: RoutingRevision = ROUTING_REVISION): string {
   const normalized = normalizeManagedSpec(spec);
   if (!normalized) throw new Error("invalid-management-spec");
-  const payload = checksumPayload(normalized);
+  const payload = checksumPayload(normalized, revision);
   const envelope = JSON.stringify({
     schema: METADATA_SCHEMA,
     version: metadataVersion(normalized),
-    ...(normalized.routing ? { generatorRevision: ROUTING_REVISION } : {}),
+    ...(normalized.routing ? { generatorRevision: revision } : {}),
     checksum: { algorithm: "sha256", value: sha256Hex(payload) },
     spec: normalized,
   });
@@ -252,7 +253,8 @@ export function parseManagedScript(script: string): ScriptImportResult {
   }
   if (!isRecord(envelope)) return failure("schema-invalid");
   if (envelope.schema !== METADATA_SCHEMA || envelope.version !== version) return failure("schema-invalid");
-  if (version === 3 && (envelope.generatorRevision !== ROUTING_REVISION
+  if (version === 3 && ((envelope.generatorRevision !== ROUTING_REVISION
+    && envelope.generatorRevision !== LEGACY_ROUTING_REVISION)
     || !exactKeys(envelope, ["schema", "version", "generatorRevision", "checksum", "spec"])
     || !exactKeys(envelope.checksum, ["algorithm", "value"]))) return failure("version-unsupported");
   if (!isRecord(envelope.checksum) || envelope.checksum.algorithm !== "sha256") return failure("schema-invalid");
@@ -261,6 +263,7 @@ export function parseManagedScript(script: string): ScriptImportResult {
   }
   const spec = normalizeManagedSpec(envelope.spec);
   if (!spec || metadataVersion(spec) !== version) return failure("schema-invalid");
-  if (sha256Hex(checksumPayload(spec)) !== envelope.checksum.value) return failure("integrity-mismatch");
-  return { ok: true, spec };
+  const revision = version === 3 ? envelope.generatorRevision as RoutingRevision : undefined;
+  if (sha256Hex(checksumPayload(spec, revision)) !== envelope.checksum.value) return failure("integrity-mismatch");
+  return { ok: true, spec, ...(revision ? { generatorRevision: revision } : {}) };
 }

@@ -1,50 +1,22 @@
 import type { GeneratorSpec, RoutingNodeReference } from "../src/types.ts";
-import { routingGroupName } from "../src/routing-plan.ts";
+import { normalizeRoutingPlan, routingGroupName } from "../src/routing-plan.ts";
 import { BackRequestedError } from "./cli-io.ts";
 import type { CliWorkflowDependencies } from "./cli-workflow.ts";
 import { getCliMessages } from "./cli-messages.ts";
 import { editRoutingPlan } from "../src/routing-plan-editing.ts";
 import { supportsSelectedRouting } from "./mihomo-capability.ts";
+import { inspectNewRoutingSource, inspectRoutingSources } from "./routing-source-catalog.ts";
 
 type Copy = ReturnType<typeof getCliMessages>;
 const identity = (node: RoutingNodeReference) => JSON.stringify([node.sourceId, node.provider, node.name]);
-
-async function inspectSources(deps: CliWorkflowDependencies, draft: GeneratorSpec, targetId: string) {
-  const available: RoutingNodeReference[] = [];
-  const unknown: Array<{ sourceId: string; provider: string | null }> = [];
-  const changed: Array<{ sourceId: string; provider: string }> = [];
-  for (const source of draft.routing?.sources ?? [{ id: "target", kind: "target" as const }]) {
-    try {
-      const profile = source.kind === "target" ? await deps.profiles.select(targetId) : await deps.profiles.findBySource(source.source);
-      if (!profile) continue;
-      if (source.kind === "target" && (profile.name !== draft.targetProfile.name || profile.source !== draft.targetProfile.source)) throw new Error("changed-target");
-      const inspection = await deps.profiles.inspectRoutingNodes?.(profile.profileId);
-      if (!inspection || inspection.status === "failed") throw new Error("unreadable-source");
-      const current = source.kind === "subscription" ? await deps.profiles.describeRoutingSource?.(profile.profileId, source.id) : null;
-      if (source.kind === "subscription" && !current) throw new Error("unreadable-source");
-      if (source.kind === "subscription") {
-        for (const saved of source.providers ?? []) {
-          const live = current?.providers?.find(provider => provider.id === saved.id);
-          if (JSON.stringify(saved) !== JSON.stringify(live)) changed.push({ sourceId: source.id, provider: saved.id });
-        }
-      }
-      for (const node of inspection.nodes) {
-        if (source.kind === "subscription" && node.provider !== null && !source.providers?.some(provider => provider.id === node.provider)) {
-          unknown.push({ sourceId: source.id, provider: node.provider });
-        } else available.push({ sourceId: source.id, provider: node.provider, name: node.name });
-      }
-      unknown.push(...inspection.failures.map(failure => ({ sourceId: source.id, provider: failure.provider })));
-    } catch { unknown.push({ sourceId: source.id, provider: null }); }
-  }
-  return { available, unknown, changed };
-}
 
 export async function verifySelectedNodes(deps: CliWorkflowDependencies, draft: GeneratorSpec, targetId: string, copy: Copy): Promise<boolean> {
   const selected = draft.routing?.outlets.filter(outlet => outlet.kind === "selected"
     && draft.routing!.modules.some(module => module.enabled && module.outletId === outlet.id)) ?? [];
   if (!selected.length) return true;
   if (!supportsSelectedRouting(await deps.mihomoVersion?.() ?? null)) { deps.io.writeLine(copy.kernelUnsupported); return false; }
-  const inspection = await inspectSources(deps, draft, targetId);
+  const inspection = await inspectRoutingSources(deps.profiles, draft, targetId, "delivery");
+  if (!inspection.targetVerified) { deps.io.writeLine(copy.aiUnavailable); return false; }
   let valid = true;
   for (const outlet of selected) {
     if (outlet.kind !== "selected") continue;
@@ -67,22 +39,14 @@ export async function verifySelectedNodes(deps: CliWorkflowDependencies, draft: 
 
 export async function collectSelectedNodes(deps: CliWorkflowDependencies, draft: GeneratorSpec, targetId: string, copy: Copy): Promise<GeneratorSpec | null> {
   if (!supportsSelectedRouting(await deps.mihomoVersion?.() ?? null)) { deps.io.writeLine(copy.kernelUnsupported); return null; }
-  const sourceId = draft.routing?.sources.find(source => source.kind === "target")?.id ?? "target";
-  const sources = structuredClone(draft.routing?.sources ?? [{ id: sourceId, kind: "target" as const }]);
-  for (let index = 0; index < sources.length; index++) {
-    const source = sources[index]!;
-    if (source.kind !== "subscription") continue;
-    const profile = await deps.profiles.findBySource(source.source);
-    const refreshed = profile ? await deps.profiles.describeRoutingSource?.(profile.profileId, source.id) : null;
-    if (refreshed) sources[index] = refreshed;
-  }
-  const inspectedDraft = { ...draft, routing: { ...draft.routing!, sources } };
-  const inspection = await inspectSources(deps, inspectedDraft, targetId);
+  const inspection = await inspectRoutingSources(deps.profiles, draft, targetId, "selection");
+  const sources = inspection.sources;
   if (inspection.unknown.length) deps.io.writeLine(copy.nodesInspectionFailed);
   const current = draft.routing?.outlets[0];
   const chosen = new Map<string, RoutingNodeReference>((current?.kind === "selected" ? current.nodes : []).map(node => [identity(node), node]));
   const available = inspection.available;
-  const candidates = [...available, ...[...chosen.values()].filter(node => !available.some(item => identity(item) === identity(node)))];
+  const availableKeys = new Set(available.map(identity));
+  const candidates = [...available, ...[...chosen.values()].filter(node => !availableKeys.has(identity(node)))];
   let page = 0;
   let filter = "";
   nodeMenu: while (true) {
@@ -92,7 +56,7 @@ export async function collectSelectedNodes(deps: CliWorkflowDependencies, draft:
     const displayed = filtered.slice(page * 10, (page + 1) * 10);
     const actions = [...displayed.map(node => ({ kind: "node" as const, node })),
       ...(page > 0 ? [{ kind: "previous" as const }] : []), ...(page + 1 < pages ? [{ kind: "next" as const }] : []),
-      { kind: "filter" as const }, ...(deps.profiles.describeRoutingSource ? [{ kind: "source" as const }] : []), { kind: "done" as const }];
+      { kind: "filter" as const }, ...(deps.profiles.readRoutingSnapshot ? [{ kind: "source" as const }] : []), { kind: "done" as const }];
     const action = actions[await deps.io.choose(copy.nodesMenu(page + 1, pages, chosen.size), actions.map(action => {
       if (action.kind === "node") {
         const source = sources.find(item => item.id === action.node.sourceId)!;
@@ -112,21 +76,19 @@ export async function collectSelectedNodes(deps: CliWorkflowDependencies, draft:
       let selected;
       try { selected = catalog[await deps.io.choose(copy.selectNodeSource, catalog.map(profile => profile.name))]!; }
       catch (error) { if (error instanceof BackRequestedError) continue; throw error; }
-      const profile = await deps.profiles.select(selected.id);
-      if (!profile || sources.some(source => source.kind === "subscription" && source.source === profile.source)) { deps.io.writeLine(copy.duplicateSource); continue; }
-      const source = await deps.profiles.describeRoutingSource?.(selected.id, deps.createChildId());
-      const inspected = await deps.profiles.inspectRoutingNodes?.(selected.id);
-      if (!source || !inspected || inspected.status === "failed") { deps.io.writeLine(copy.nodesInspectionFailed); continue; }
-      sources.push(source);
-      const added = inspected.nodes.filter(node => node.provider === null || source.providers?.some(provider => provider.id === node.provider))
-        .map(node => ({ sourceId: source.id, provider: node.provider, name: node.name }));
-      if (added.length !== inspected.nodes.length || inspected.failures.length) deps.io.writeLine(copy.nodesInspectionFailed);
-      available.push(...added); candidates.push(...added); filter = ""; page = Math.floor((candidates.length - added.length) / 10);
+      const added = await inspectNewRoutingSource(deps.profiles, selected.id, deps.createChildId());
+      if (!added) { deps.io.writeLine(copy.nodesInspectionFailed); continue; }
+      if (added.source.source === draft.targetProfile.source || sources.some(source => source.kind === "subscription"
+        && source.source === added.source.source)) { deps.io.writeLine(copy.duplicateSource); continue; }
+      sources.push(added.source);
+      if (added.partial) deps.io.writeLine(copy.nodesInspectionFailed);
+      for (const node of added.nodes) availableKeys.add(identity(node));
+      candidates.push(...added.nodes); filter = ""; page = Math.floor((candidates.length - added.nodes.length) / 10);
     }
     else if (action.kind === "node") {
       const key = identity(action.node);
       if (chosen.has(key)) chosen.delete(key);
-      else if (available.some(node => identity(node) === key)) chosen.set(key, action.node);
+      else if (availableKeys.has(key)) chosen.set(key, action.node);
     } else {
       if (!chosen.size) { deps.io.writeLine(copy.nodesRequired); continue; }
       let name = current?.kind === "selected" ? current.groupName : "Kit AI";
@@ -144,6 +106,7 @@ export async function collectSelectedNodes(deps: CliWorkflowDependencies, draft:
       const next = editRoutingPlan(draft, {
         kind: "select-nodes", groupName: name, sources, nodes: [...chosen.values()],
       });
+      if (!normalizeRoutingPlan(next.routing)) { deps.io.writeLine(copy.nodeSourceChanged); return null; }
       return await verifySelectedNodes(deps, next, targetId, copy) ? next : null;
     }
   }

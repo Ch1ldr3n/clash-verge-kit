@@ -54,9 +54,15 @@ export interface LocalProfileRepository {
   findBySource(source: string): Promise<LocalProfileSelection | null>;
   addProfileLocation?(input: string): Promise<ProfileLocationAddResult>;
   readManagedPlan?(profileId: string): Promise<ManagedPlanReadResult>;
-  inspectRoutingNodes?(profileId: string): Promise<RoutingNodeInspection>;
-  describeRoutingSource?(profileId: string, sourceId: string): Promise<RoutingSubscriptionSource | null>;
+  readRoutingSnapshot?(lookup: { profileId: string } | { source: string }, sourceId: string): Promise<RoutingSnapshot | null>;
   installManagedScript(profileId: string, script: string, expectedRevision?: string): Promise<ManagedScriptInstallResult>;
+}
+
+export interface RoutingSnapshot {
+  name: string;
+  source: string;
+  description: RoutingSubscriptionSource | null;
+  inspection: RoutingNodeInspection;
 }
 
 export type ManagedPlanReadResult =
@@ -369,16 +375,15 @@ export function createLocalProfileRepository(
       }
       return { status: "not-found" };
     },
-    async inspectRoutingNodes(profileId) {
+    async readRoutingSnapshot(lookup, sourceId) {
       const profiles = await loadProfiles();
-      const profile = profiles.profilesById.get(profileId);
-      return inspectLocalRoutingNodes(profile?.profileFilePath, path.dirname(profiles.filePath));
-    },
-    async describeRoutingSource(profileId, sourceId) {
+      if (!profiles.filePath) throw new Error("unreadable-profile-index");
+      const profile = "profileId" in lookup ? profiles.profilesById.get(lookup.profileId)
+        : profiles.profilesBySource.get(normalizeProfileSource(lookup.source) ?? "");
+      if (!profile) return null;
+      const identity = { name: profile.name, source: profile.source };
       try {
-        const profiles = await loadProfiles();
-        const profile = profiles.profilesById.get(profileId);
-        if (!profile?.profileFilePath) return null;
+        if (!profile.profileFilePath) throw new Error("missing-snapshot");
         const directory = path.dirname(profiles.filePath);
         const root = await readBoundedYaml(profile.profileFilePath, directory);
         const providers: NonNullable<RoutingSubscriptionSource["providers"]> = [];
@@ -393,8 +398,13 @@ export function createLocalProfileRepository(
           if (typeof source !== "string" || source.includes("../")) continue;
           providers.push({ id: key, mode: raw.type, source, interval: typeof raw.interval === "number" ? raw.interval : 3600 });
         }
-        return { id: sourceId, kind: "subscription", name: profile.name, mode: "http", source: profile.source, providers };
-      } catch { return null; }
+        return { ...identity,
+          description: { id: sourceId, kind: "subscription", ...identity, mode: "http", providers },
+          inspection: await inspectLocalRoutingNodes(root, directory) };
+      } catch {
+        return { ...identity, description: null,
+          inspection: { status: "failed", nodes: [], failures: [{ provider: null, reason: "unreadable" }] } };
+      }
     },
     async readManagedPlan(profileId) {
       try {

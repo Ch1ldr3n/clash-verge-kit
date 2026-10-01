@@ -623,17 +623,20 @@ async function collectAiRouting(
   copy: CliMessages,
   chooseOnly = false,
 ): Promise<GeneratorSpec | null> {
+  const actions = [
+    { kind: "existing", label: copy.aiChooseExisting },
+    ...(!chooseOnly ? [{ kind: "disable", label: copy.aiDisable }] as const : []),
+    ...(!chooseOnly || dependencies.profiles.readRoutingSnapshot
+      ? [{ kind: "selected", label: copy.aiSelectNodes }] as const : []),
+  ] as const;
   while (true) {
-    const action = chooseOnly
-      ? dependencies.profiles.inspectRoutingNodes
-        ? [0, 2][await dependencies.io.choose(copy.aiAction, [copy.aiChooseExisting, copy.aiSelectNodes])]!
-        : 0
-      : await dependencies.io.choose(copy.aiAction, [copy.aiChooseExisting, copy.aiDisable, copy.aiSelectNodes]);
-    if (action === 2) {
+    const action = actions[actions.length === 1 ? 0
+      : await dependencies.io.choose(copy.aiAction, actions.map(action => action.label))]!.kind;
+    if (action === "selected") {
       try { return await collectSelectedNodes(dependencies, draft, targetProfileId, copy); }
       catch (error) { if (error instanceof BackRequestedError) continue; throw error; }
     }
-    if (action === 1) return editRoutingPlan(draft, { kind: "disable" });
+    if (action === "disable") return editRoutingPlan(draft, { kind: "disable" });
     const inspection = await inspectAiTarget(dependencies, draft, targetProfileId, copy);
     if (!inspection) return null;
     while (true) {
@@ -649,7 +652,7 @@ async function collectAiRouting(
         }, false);
       } catch (error) {
         if (error instanceof BackRequestedError) {
-          if (chooseOnly && !dependencies.profiles.inspectRoutingNodes) throw error;
+          if (chooseOnly && !dependencies.profiles.readRoutingSnapshot) throw error;
           break;
         }
         throw error;
@@ -673,10 +676,11 @@ async function verifyAiOutlet(
 ): Promise<boolean> {
   const active = draft.routing?.modules.find(module => module.enabled);
   if (!active && !draft.ai.enabled) return true;
-  if (active && draft.routing!.outlets.find(outlet => outlet.id === active.outletId)?.kind === "selected") {
+  const outlet = active && draft.routing!.outlets.find(outlet => outlet.id === active.outletId);
+  if (outlet && outlet.kind === "selected") {
     return verifySelectedNodes(dependencies, draft, targetProfileId, copy);
   }
-  const groupName = active ? draft.routing!.outlets.find(outlet => outlet.id === active.outletId)?.groupName : draft.ai.groupName;
+  const groupName = active ? outlet?.groupName : draft.ai.groupName;
   const inspection = await inspectAiTarget(dependencies, draft, targetProfileId, copy);
   if (!inspection) return false;
   if (!groupName || !inspection.selectGroups.includes(groupName)) {
@@ -777,28 +781,30 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         if (invalidAction === 0) break;
       }
 
-      let action: number;
+      const actions = [
+        { kind: "deliver", label: copy.reviewAndDeliver },
+        ...(!routingOnly ? [
+          { kind: "add-child", label: copy.addChild },
+          { kind: "rename-child", label: copy.renameChild },
+        ] as const : []),
+        { kind: "details", label: copy.showDetails },
+        { kind: "preview", label: copy.showMaskedScript },
+        { kind: "restart", label: copy.restart },
+        { kind: "routing", label: copy.aiRouting },
+      ] as const;
+      let action: typeof actions[number]["kind"];
       try {
-        const actions = routingOnly ? [0, 3, 4, 5, 6] : [0, 1, 2, 3, 4, 5, 6];
         const selectedAction = await dependencies.io.choose(
           copy.previewAction,
-          [
-            copy.reviewAndDeliver,
-            copy.addChild,
-            copy.renameChild,
-            copy.showDetails,
-            copy.showMaskedScript,
-            copy.restart,
-            copy.aiRouting,
-          ].filter((_label, index) => actions.includes(index)),
+          actions.map(action => action.label),
           copy.exit,
         );
-        action = actions[selectedAction]!;
+        action = actions[selectedAction]!.kind;
       } catch (error) {
         if (error instanceof BackRequestedError) return "completed";
         throw error;
       }
-      if (action === 0) {
+      if (action === "deliver") {
         const deliveryResult = await reviewAndDeliver(
           dependencies,
           session,
@@ -812,7 +818,7 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         continue;
       }
 
-      if (action === 1) {
+      if (action === "add-child") {
         if (session.draft.children.length >= MAX_MANAGED_CHILDREN) {
           dependencies.io.writeLine(copy.childLimitReached(MAX_MANAGED_CHILDREN));
           continue;
@@ -843,7 +849,7 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         showGenerationSummary(dependencies.io, session.generation, language, copy);
         continue;
       }
-      if (action === 2) {
+      if (action === "rename-child") {
         try {
           const last = session.draft.children.at(-1)!;
           session = updateLatestChildGroup(
@@ -857,16 +863,16 @@ export async function runCliWorkflow(dependencies: CliWorkflowDependencies): Pro
         }
         continue;
       }
-      if (action === 3) {
-        showGenerationDetails(dependencies.io, session.generation!, language, copy);
+      if (action === "details") {
+        showGenerationDetails(dependencies.io, session.generation, language, copy);
         continue;
       }
-      if (action === 4) {
+      if (action === "preview") {
         dependencies.io.writeLine(copy.maskedPreview);
-        dependencies.io.writeLine(session.generation!.maskedScript);
+        dependencies.io.writeLine(session.generation.maskedScript);
         continue;
       }
-      if (action === 6) {
+      if (action === "routing") {
         try {
           const nextAi = await collectAiRouting(dependencies, session.draft, collected.targetProfileId, copy);
           if (nextAi) {

@@ -115,10 +115,12 @@ function metadata(script: string): { spec: GeneratorSpec } {
 
 describe("frozen routing composition and preview", () => {
   it.each(cases)("preserves $name bytes, authenticated metadata and masked source handling", ({ name, spec, localPaths: expectedPaths }) => {
-    const generated = generateClashVergeScript(spec);
+    const revision = name.startsWith("v3-") ? "routing-v1" : undefined;
+    const generated = generateClashVergeScript(spec, revision ? { routingRevision: revision } : {});
     expect(generated.valid, JSON.stringify(generated.diagnostics)).toBe(true);
     expect({ full: fingerprint(generated.fullScript), masked: fingerprint(generated.maskedScript) }).toEqual(baseline[name]);
-    expect(parseManagedScript(generated.fullScript)).toEqual({ ok: true, spec: normalizeManagedSpec(spec) });
+    expect(parseManagedScript(generated.fullScript)).toEqual({ ok: true, spec: normalizeManagedSpec(spec),
+      ...(revision ? { generatorRevision: revision } : {}) });
     expect(classifyManagedScript(generated.fullScript)).toBe("current-readable");
     expect(inspectManagedScript(generated.fullScript)).toEqual({ authenticity: "current-readable", parsedSpec: normalizeManagedSpec(spec) });
     expect(() => new vm.Script(generated.maskedScript)).not.toThrow();
@@ -145,5 +147,43 @@ describe("frozen routing composition and preview", () => {
       expect(maskedMetadata.routing!.sources[2]).toMatchObject({ source: localPaths[1], providers: [{ source: localPaths[2] }] });
       expect(generated.maskedScript).toContain("https://••••••••••••");
     }
+  });
+});
+
+describe("routing provider cache isolation", () => {
+  function privateCachePath(spec: GeneratorSpec): string {
+    const generated = generateClashVergeScript(spec);
+    expect(generated.valid).toBe(true);
+    const match = generated.fullScript.match(/"aliases": \{\s*.+?: "([0-9a-f]{24})"/);
+    expect(match).not.toBeNull();
+    return `clash_verge_kit_nodes_${match![1]}.yaml`;
+  }
+
+  it("uses a separate private cache for the same target provider in two subscriptions", () => {
+    const first = standaloneRouting();
+    first.routing!.outlets = [{ id: "outlet", kind: "selected", groupName: "Chosen", nodes: [
+      { sourceId: "target", provider: "pool", name: "same-node" },
+    ] }];
+    const second = structuredClone(first);
+    second.targetProfile = { name: "Other", source: "https://other.example.test/OTHER_TARGET_SENTINEL" };
+    expect(privateCachePath(first)).not.toBe(privateCachePath(second));
+    second.targetProfile.name = first.targetProfile.name;
+    expect(privateCachePath(first)).not.toBe(privateCachePath(second));
+    const generated = generateClashVergeScript(first);
+    expect(parseManagedScript(generated.fullScript)).toEqual({ ok: true, spec: normalizeManagedSpec(first),
+      generatorRevision: "routing-v2" });
+    expect(classifyManagedScript(generated.fullScript)).toBe("current-readable");
+  });
+
+  it("uses a separate private cache when a child provider source changes", () => {
+    const first = mixedRouting();
+    first.routing!.outlets[0] = { id: "outlet", kind: "selected", groupName: "Chosen", nodes: [
+      { sourceId: "http-source", provider: "remote-pool", name: "same-node" },
+    ] };
+    const second = structuredClone(first);
+    const child = second.routing!.sources.find(source => source.id === "http-source");
+    if (!child || child.kind !== "subscription") throw new Error("missing child source");
+    child.providers![0]!.source = "https://other.example.test/OTHER_PROVIDER_SENTINEL";
+    expect(privateCachePath(first)).not.toBe(privateCachePath(second));
   });
 });

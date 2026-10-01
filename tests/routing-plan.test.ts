@@ -164,7 +164,7 @@ describe("saved routing through the public generator", () => {
     const generated = generateClashVergeScript(spec);
     expect(generated.valid).toBe(true);
     expect(generated.fullScript).toContain("CLASH_VERGE_KIT_MANAGEMENT_V3");
-    expect(parseManagedScript(generated.fullScript)).toEqual({ ok: true, spec });
+    expect(parseManagedScript(generated.fullScript)).toEqual({ ok: true, spec, generatorRevision: "routing-v2" });
     expect(classifyManagedScript(generated.fullScript)).toBe("current-readable");
     const input = { "proxy-groups": [{ name: "PROXY", type: "select", proxies: ["DIRECT"] }],
       rules: ["DOMAIN-SUFFIX,openai.com,DIRECT", "MATCH,DIRECT"], dns: { enable: false } };

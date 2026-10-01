@@ -13,6 +13,8 @@ import {
 } from "./script-import.ts";
 import { normalizeManagedSpec } from "./script-import.ts";
 import { buildRoutingRuntime } from "./routing-runtime.ts";
+import { ROUTING_REVISION } from "./routing-plan.ts";
+import type { RoutingRevision } from "./routing-plan.ts";
 
 const AI_RULESET_URL =
   "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/category-ai-!cn.mrs";
@@ -1166,8 +1168,8 @@ function main(config, profileName) {
 }`;
 }
 
-function composeDeliveryScript(spec: GeneratorSpec, settings: RuntimeSettings): string {
-  const managementBlock = createManagementMetadataBlock(spec);
+function composeDeliveryScript(spec: GeneratorSpec, settings: RuntimeSettings, revision: RoutingRevision): string {
+  const managementBlock = createManagementMetadataBlock(spec, revision);
   if (!spec.routing) return buildDeliveryScript(settings, managementBlock, spec.ai.ruleSource);
 
   const hasNesting = Boolean(settings.children.length || settings.removedChildren.length);
@@ -1175,10 +1177,12 @@ function composeDeliveryScript(spec: GeneratorSpec, settings: RuntimeSettings): 
     ? buildRuntimeScript(settings, managementBlock)
       .replace("function main(config, profileName)", "function applyNesting(config, profileName)")
     : managementBlock;
-  return buildRoutingRuntime(spec.routing, settings.targetProfileName, prelude, hasNesting);
+  return buildRoutingRuntime(spec.routing, settings.targetProfileName, prelude, hasNesting,
+    spec.targetProfile.source, revision);
 }
 
-export function generateClashVergeScript(spec: GeneratorSpec): GenerationResult {
+export function generateClashVergeScript(spec: GeneratorSpec,
+  options: { routingRevision?: RoutingRevision } = {}): GenerationResult {
   const diagnostics: Diagnostic[] = [];
   if (spec.routing) {
     const normalized = normalizeManagedSpec(spec);
@@ -1237,8 +1241,8 @@ export function generateClashVergeScript(spec: GeneratorSpec): GenerationResult 
   return {
     valid,
     operation,
-    fullScript: composeDeliveryScript(spec, settings),
-    maskedScript: composeDeliveryScript(redactManagedSpec(spec), maskedSettings(settings)),
+    fullScript: composeDeliveryScript(spec, settings, options.routingRevision ?? ROUTING_REVISION),
+    maskedScript: composeDeliveryScript(redactManagedSpec(spec), maskedSettings(settings), options.routingRevision ?? ROUTING_REVISION),
     diagnostics,
     topology,
   };

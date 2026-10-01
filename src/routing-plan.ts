@@ -1,6 +1,8 @@
 import type { RoutingPlan } from "./types";
 
-export const ROUTING_REVISION = "routing-v1";
+export const ROUTING_REVISION = "routing-v2";
+export const LEGACY_ROUTING_REVISION = "routing-v1";
+export type RoutingRevision = typeof ROUTING_REVISION | typeof LEGACY_ROUTING_REVISION;
 const UNSAFE_NAME = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/u;
 
 export function exactKeys(value: unknown, allowed: string[]): value is Record<string, unknown> {
