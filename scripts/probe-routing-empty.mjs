@@ -1,9 +1,9 @@
+import { createProbeRuntime } from "./probe-runtime.mjs";
 // Isolated research probe, not a product generator or a client controller.
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import http from "node:http";
 import { once } from "node:events";
 import { setTimeout as delay } from "node:timers/promises";
@@ -13,26 +13,9 @@ const binary = process.env.MIHOMO_BIN || "D:\\Clash Verge\\verge-mihomo.exe";
 const version = spawnSync(binary, ["-v"], { encoding: "utf8", windowsHide: true });
 if (version.error || version.status !== 0) throw version.error || Error(version.stderr);
 console.log(version.stdout.trim());
-const root = await mkdtemp(join(tmpdir(), "kit-routing-probe-"));
-const servers = [];
-const sockets = new Set();
-let child;
-let logs = "";
-let directHits = 0;
-async function listen(handler) {
-  const server = http.createServer(handler);
-  server.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
-  servers.push(server);
-  server.listen(0, "127.0.0.1");
-  await once(server, "listening");
-  return server;
-}
-async function freePort() {
-  const server = await listen();
-  const port = server.address().port;
-  await new Promise(resolve => server.close(resolve));
-  return port;
-}
+const probe = await createProbeRuntime("kit-routing-probe-");
+const { root, listen, freePort } = probe;
+let child, directHits = 0;
 const proxy = (name, port) => ({ name, type: "http", server: "127.0.0.1", port });
 try {
   const origin = await listen((_req, res) => { directHits++; res.end("DIRECT-TRAP"); });
@@ -94,10 +77,7 @@ try {
   };
   const configPath = join(root, "config.yaml");
   await writeFile(configPath, stringify(config));
-  child = spawn(binary, ["-d", root, "-f", configPath], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-  child.stdout.on("data", chunk => { logs += chunk; });
-  child.stderr.on("data", chunk => { logs += chunk; });
-  child.on("error", error => { logs += error.message; });
+  child = probe.startKernel(binary, configPath);
   async function api(path, method = "GET", body) {
     const response = await fetch(`http://127.0.0.1:${controller}${path}`, {
       method, headers: { Authorization: "Bearer synthetic-probe-only", "Content-Type": "application/json" },
@@ -237,10 +217,7 @@ try {
   const exited = once(child, "exit");
   child.kill();
   await exited;
-  child = spawn(binary, ["-d", root, "-f", configPath], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-  child.stdout.on("data", chunk => { logs += chunk; });
-  child.stderr.on("data", chunk => { logs += chunk; });
-  child.on("error", error => { logs += error.message; });
+  child = probe.startKernel(binary, configPath);
   await until(() => api("/version"));
   await members("remote-selected", ["same[1]"]);
   await select("remote-selected");
@@ -255,29 +232,8 @@ try {
   assert.equal(await request(), "SOURCE-A");
   console.log("PASS failed config application retains previous running configuration (not proof of blocking)");
 } catch (error) {
-  console.error(logs);
+  console.error(probe.logs);
   throw error;
 } finally {
-  async function bounded(promise) {
-    let timer;
-    try {
-      await Promise.race([promise, new Promise((_, reject) => {
-        timer = setTimeout(() => reject(Error("Probe cleanup exceeded 5 seconds; temporary files retained")), 5000);
-      })]);
-    } finally { clearTimeout(timer); }
-  }
-  for (const socket of sockets) socket.destroy();
-  try {
-    await bounded(Promise.all(servers.map(server => new Promise(resolve => server.close(resolve)))));
-  } finally {
-    // Always stop our kernel, even if closing a test server timed out.
-    if (child?.pid && child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit");
-      child.kill();
-      await bounded(exited);
-    }
-  }
-  const absolute = resolve(root);
-  assert.ok(absolute.startsWith(resolve(tmpdir()) + sep) && absolute.includes("kit-routing-probe-"));
-  await bounded(rm(absolute, { recursive: true, force: true }));
+  await probe.close();
 }

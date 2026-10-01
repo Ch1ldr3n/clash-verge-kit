@@ -1,28 +1,26 @@
 # 验证与验收说明
 
-本文说明 CLI-only 产品的自动化覆盖范围和真实环境人工确认边界。验证过程不得使用或记录真实订阅 URL、token、`profiles.yaml`、YAML 原文或完整生成脚本。
+本文说明 CLI-only 产品的自动化覆盖范围和真实客户端边界。验收使用合成配置；不得把真实订阅 URL、token、`profiles.yaml`、YAML 原文或完整生成脚本写入记录。
 
 ## 完整自动化验收
 
 ```powershell
-npm.cmd test
-npm.cmd run build:cli
-npm.cmd run verify:privacy
-npm.cmd run verify:package
+npm.cmd run check:acceptance
 ```
 
-也可以运行：
+这一个入口顺序执行发行检查和四组隔离 Mihomo 探针。需要可执行的测试内核，默认路径为 `D:\Clash Verge\verge-mihomo.exe`；其他位置先设置 `$env:MIHOMO_BIN`。本轮实测版本是稳定版 v1.19.31，验收使用 Node.js v24.15.0。部分验收脚本直接导入 TypeScript，需要 Node.js 支持默认类型擦除；产品构建后的 CLI 仍使用 package.json 声明的 Node.js 22.12+。
 
-```powershell
-npm.cmd run check
-```
+| 入口 | 覆盖范围 |
+| --- | --- |
+| `npm.cmd run check` | 单元与工作流回归、类型检查、CLI 构建、构建隐私检查、npm pack 文件清单 |
+| `npm.cmd run check:release` | 上述检查，加 `.tgz` 隔离安装；Windows 下运行安装后的实际 CLI 创建、写入、回读编辑、关闭和取消会话 |
+| `npm.cmd run test:routing` | 四组独立 Mihomo 探针：AI 规则交付、正式脚本路由、跨目标缓存隔离、空候选及更新失败语义 |
+| `npm.cmd run check:acceptance` | `check:release` + `test:routing`，任一步失败即退出 |
+| `npm.cmd run test:mihomo` | 另行执行生成器 apply/update/restore；用 `MIHOMO_EXPECTED_VERSION` 指定核验版本 |
 
-- `npm.cmd test`：只运行 Node/Vitest 的 CLI 工作流、共用生成器、本机发现、配置仓库、远程读取、安全写入、脚本格式和会话单元测试。
-- `npm.cmd run build:cli`：执行 TypeScript 检查，并生成 `dist/cli/cli.mjs`。
-- `npm.cmd run verify:privacy`：检查 CLI 构建无 source map 和禁止测试标记，且包配置、依赖、npm scripts 与 `.cmd` 没有残留 Web 入口。
-- `npm.cmd run verify:package`：执行 npm pack dry-run；包只应含 `LICENSE`、`README.md`、`dist/cli/cli.mjs` 和 `package.json`。
+`scripts/probe-routing-contract.mjs` 是早期研究模型的合同测试，保留用于解释设计；它不运行当前生产生成器，不计入生产验收。`probe-ai-source.mjs` 检查固定的公开规则版本，也不代表当前滚动规则或真实 AI 服务可用性。
 
-当前验收不运行浏览器、Playwright、本机 HTTP 服务或 Web E2E。任何一项退出码非零都不能宣称完整验收通过。
+产品 CLI 不运行浏览器或提供本机 HTTP 服务。自动化读取测试和另行执行的隔离 Mihomo 探针可使用临时回环 HTTP 服务；它们不访问或修改活跃客户端。任何一项退出码非零都不能宣称完整验收通过。
 
 ## 发行前 `.tgz` 冒烟
 
@@ -30,9 +28,13 @@ npm.cmd run check
 npm.cmd run check:release
 ```
 
-这会先执行完整自动化验收，再在独立临时目录中生成 `.tgz`、使用隔离 npm 缓存和全局安装前缀安装该包，并通过安装后的 `clash-verge-kit` 命令输入 `0` 验证语言菜单可启动。临时文件会在结束时删除；它不发布 npm 包、不改变 GitHub 仓库可见性，也不访问真实 Clash Verge Rev 配置或订阅。安装阶段可访问 npm registry 以解析声明的运行时依赖。
+这会先执行 `check`，再在独立临时目录中生成 `.tgz`，使用隔离 npm 缓存和全局安装前缀安装该包，通过安装后的命令验证语言菜单可启动、退出。Windows 下额外以合成 `APPDATA` 运行安装后的 CLI，依次创建并写入 AI 方案、重新打开更换出口、关闭分流、重新打开后取消；每次写入都核对完整脚本可信性和原文件备份内容，并确认索引未改、默认输出未泄漏来源和完整脚本。
 
-## CLI 人工冒烟
+这是实际 Node/CLI/文件系统会话，输入通过管道驱动；不等于可视终端、系统剪贴板或 Verge 激活验收。临时文件会在结束时删除；它不发布 npm 包、不改变 GitHub 仓库可见性，也不访问真实 Clash Verge Rev 配置或订阅。安装阶段可访问 npm registry 以解析声明的运行时依赖。
+
+## 可视终端与客户端补充检查
+
+以下保留完整场景清单，其中流程和文件读写已有上述自动化覆盖。尚未由自动化证明的是可视终端显示、真实剪贴板以及用户当前 Verge 的重新激活和业务出口；无需重复把所有 CLI 步骤交给用户手测。
 
 ```powershell
 npm.cmd run cli
@@ -53,9 +55,27 @@ npm.cmd run cli
 13. 当前目标写入完成页应明确“无需更新主订阅”，同时要求回到 Clash Verge Rev 重新激活当前订阅；选择其他目标时应提示激活该目标订阅。
 14. 重新激活后检查嵌套子组正常出现且没有重复；原有节点和新增子组顺序不因本次菜单优化改变，Kit 不自动切换主代理组当前选中项；自动化不把“文件已写入”当作“运行配置已应用”。
 
-真实终端、剪贴板、本机 Clash Verge Rev 目录和重新激活行为仍需要人工冒烟。
+本轮未完成可视终端、真实剪贴板和活跃 Verge 的重新激活检查；没有把隔离进程成功当作当前客户端已经生效。
 
 ## 最近验证记录
+
+2026-10-02：迁移到独立 worktree 后重新安装依赖并运行 `check:acceptance`，19 个文件、218 项测试，安装后的 Windows CLI 会话和四组隔离 Mihomo 探针全部通过；v1.19.31 的 apply/update/restore 另行通过。真实客户端验收范围没有扩大。详见[本次复验](research/2026-09-23-release-readiness.md#2026-10-02独立-worktree-复验)。
+
+2026-09-29 代码整理与自动验收：
+
+- `npm.cmd run check:acceptance` 全部通过：19 个测试文件、218 项测试；类型/构建/隐私/包检查；安装后的 Windows CLI 完整会话；四组隔离 Mihomo 探针。v1.19.31 的 apply/update/restore 另行通过。
+- 修复索引损坏误判来源不存在、已删除 provider 引用仍可形成无效草稿、只用子来源时遗漏目标身份核验；补充可读但没有自身节点的目标仍可使用子来源的真实文件回归。
+- 四组探针共用进程、回环服务和临时目录清理；CLI 菜单改用具名动作，添加来源复用已有快照，减少重复读取。
+- 当前真实目标仍绑定自定义只读脚本，配置未提供 TCP Controller，声明的命名管道读取为 `ENOENT`。未改动活跃客户端，真实激活和业务流量仍未核验。详见[验收记录](research/2026-09-23-release-readiness.md#2026-09-29代码整理与自动验收)。
+
+以下为历史记录，测试数量和当时待办不代表当前结果。
+
+2026-09-23 规则分流 V1 发布前复核及缓存隔离修复：
+
+- 基线 `53abaf0` 的 `check:release` 通过 208 项回归，但新增隔离探针复现 P1：切换到目标 B 后，Kit AI 出口使用了 A 的私有 provider 缓存。
+- 本地修复并深化来源检查 module 后 `check:release` 通过：19 个测试文件、212 项回归、类型检查、构建、隐私检查、打包和 `.tgz` 隔离安装启动。旧 `routing-v1` V3 与 V2 固定生成摘要保持不变，新生成默认 `routing-v2`。
+- `node scripts/probe-routing-cache-isolation.mjs` 通过：A/B 私有路径不同，B 首次来源 503 时未使用 A 的缓存；此探针尚未纳入 `check:release`，需单独执行。既有两组规则分流 Mihomo 探针和 v1.19.31 的 apply/update/restore 也通过。
+- 安全文档已同步 V3 保存与备份事实；当前客户端目标绑定自定义只读脚本，Controller TCP/管道不可连接，真实客户端激活和业务流量仍未验收。详见[本轮检查、复现与修复结果](research/2026-09-23-release-readiness.md)。
 
 2026-09-01 子订阅对抗性边界补强：
 

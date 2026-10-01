@@ -1,11 +1,10 @@
+import { createProbeRuntime } from "./probe-runtime.mjs";
 // Isolated acceptance probe. Never opens the user's profiles or active controller.
 import assert from "node:assert/strict";
 import http from "node:http";
-import { once } from "node:events";
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import vm from "node:vm";
 import { stringify } from "yaml";
@@ -15,23 +14,9 @@ const binary = process.env.MIHOMO_BIN || "D:\\Clash Verge\\verge-mihomo.exe";
 const version = spawnSync(binary, ["-v"], { encoding: "utf8", windowsHide: true });
 assert.equal(version.status, 0, "installed test kernel unavailable");
 console.log(version.stdout.trim());
-const root = await mkdtemp(join(tmpdir(), "kit-ai-delivery-"));
-const servers = [], sockets = new Set();
-let kernel, logs = "", remoteText = "+.ai.fixture.test\n", remoteStatus = 200, hits = 0;
-async function server(handler) {
-  const instance = http.createServer(handler);
-  instance.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
-  instance.listen(0, "127.0.0.1");
-  servers.push(instance);
-  await once(instance, "listening");
-  return instance;
-}
-async function freePort() {
-  const instance = await server();
-  const port = instance.address().port;
-  await new Promise(done => instance.close(done));
-  return port;
-}
+const probe = await createProbeRuntime("kit-ai-delivery-");
+const { root, listen: server, freePort: freePort } = probe;
+let remoteText = "+.ai.fixture.test\n", remoteStatus = 200, hits = 0;
 async function fakeProxy(label) {
   const instance = await server((_req, res) => res.end(label));
   instance.on("connect", (_req, socket) => {
@@ -95,10 +80,7 @@ try {
   assert.deepEqual(apply(generated.fullScript, first), first);
   assert.equal(await readFile(originalPath, "utf8"), originalText);
   await writeFile(configPath, stringify(localize(first)));
-  kernel = spawn(binary, ["-d", root, "-f", configPath], { cwd: root, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-  kernel.stdout.on("data", chunk => { logs += chunk; });
-  kernel.stderr.on("data", chunk => { logs += chunk; });
-  kernel.on("error", error => { logs += error.message; });
+  probe.startKernel(binary, configPath, root);
   async function api(route, method = "GET", body) {
     const response = await fetch(`http://127.0.0.1:${controllerPort}${route}`, {
       method, headers: { Authorization: "Bearer isolated-test-only", "Content-Type": "application/json" },
@@ -154,15 +136,8 @@ try {
   assert.equal(await readFile(scriptPath, "utf8"), previousScript);
   console.log("PASS restoring the previous script restores current subscription routing, not an old snapshot");
 } catch (error) {
-  console.error(logs.slice(-2000));
+  console.error(probe.logs.slice(-2000));
   throw error;
 } finally {
-  if (kernel && kernel.exitCode === null) {
-    const exited = once(kernel, "exit"); kernel.kill(); await exited;
-  }
-  for (const socket of sockets) socket.destroy();
-  await Promise.all(servers.filter(instance => instance.listening).map(instance => new Promise(done => instance.close(done))));
-  const absolute = resolve(root);
-  assert.ok(absolute.startsWith(resolve(tmpdir()) + sep) && absolute.includes("kit-ai-delivery-"));
-  await rm(absolute, { recursive: true, force: true });
+  await probe.close();
 }

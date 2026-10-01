@@ -1,11 +1,10 @@
+import { createProbeRuntime } from "./probe-runtime.mjs";
 // Real TCP acceptance for production-generated routing. All traffic is loopback.
 import assert from "node:assert/strict";
 import http from "node:http";
-import { once } from "node:events";
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import vm from "node:vm";
 import { stringify } from "yaml";
@@ -18,16 +17,9 @@ assert.equal(version.status, 0);
 const release = version.stdout.match(/v(\d+\.\d+\.\d+)/)?.[1];
 assert.ok(supportsSelectedRouting(release ?? null));
 console.log(version.stdout.trim());
-const root = await mkdtemp(join(tmpdir(), "kit-generated-routing-"));
-const servers = [], sockets = new Set();
-let kernel, logs = "", directHits = 0, unselectedHits = 0;
-async function listen(handler) {
-  const server = http.createServer(handler);
-  servers.push(server);
-  server.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
-  server.listen(0, "127.0.0.1"); await once(server, "listening"); return server;
-}
-async function port() { const server = await listen(); const value = server.address().port; await new Promise(done => server.close(done)); return value; }
+const probe = await createProbeRuntime("kit-generated-routing-");
+const { root, listen, freePort: port } = probe;
+let directHits = 0, unselectedHits = 0;
 async function upstream(label, count = () => {}) {
   const server = await listen((_req, response) => { count(); response.end(label); });
   server.on("connect", (_request, socket) => {
@@ -74,9 +66,7 @@ try {
   }
   let output = generated(spec, baseline());
   await writeFile(configPath, stringify(output));
-  kernel = spawn(binary, ["-d", root, "-f", configPath], { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-  kernel.stdout.on("data", chunk => { logs += chunk; }); kernel.stderr.on("data", chunk => { logs += chunk; });
-  kernel.on("error", error => { logs += error.message; });
+  probe.startKernel(binary, configPath);
   async function api(endpoint, method = "GET", value) {
     const response = await fetch(`http://127.0.0.1:${controllerPort}${endpoint}`, { method,
       headers: { Authorization: "Bearer synthetic-only", "Content-Type": "application/json" },
@@ -170,11 +160,7 @@ try {
   assert.equal(coldProvider.ruleCount, 0);
   assert.equal(afterCold, "UNSELECTED");
   console.log("PASS first rule download failure: configuration accepted (204), rules empty (0), ordinary routing remains active");
-} catch (error) { console.error(logs); throw error; }
+} catch (error) { console.error(probe.logs); throw error; }
 finally {
-  if (kernel && kernel.exitCode === null && kernel.signalCode === null) { const exited = once(kernel, "exit"); kernel.kill(); await exited; }
-  for (const socket of sockets) socket.destroy();
-  await Promise.all(servers.filter(server => server.listening).map(server => new Promise(done => server.close(done))));
-  const absolute = resolve(root); assert.ok(absolute.startsWith(resolve(tmpdir()) + sep) && absolute.includes("kit-generated-routing-"));
-  await rm(absolute, { recursive: true, force: true });
+  await probe.close();
 }

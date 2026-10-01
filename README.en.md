@@ -10,24 +10,21 @@ The current development workspace supports AI routing: choose “AI routing only
 
 New plans use MetaCubeX's `category-ai-!cn` category, downloaded and refreshed by Mihomo; it includes some shared services and asset sites. Migrated plans retain their original rule sources. Reused groups retain their policies, including DIRECT. Selected-node groups block when a successful update removes every selected candidate; failed updates may retain the last valid candidates. Reactivate afterward and inspect rule downloads and connection records.
 
-Manual selection requires a verified **stable Mihomo 1.19.29 or newer**. The local node list is an inspection snapshot, not a connectivity check; unreadable providers are not treated as empty. A first rule download failure may leave ordinary airport routing active. See the [acceptance record](docs/research/2026-09-08-routing-v1-acceptance.md) for tested behavior and limits.
+Manual selection requires a verified **stable Mihomo 1.19.29 or newer**. The local node list is an inspection snapshot, not a connectivity check; unreadable providers are not treated as empty. A first rule download failure may leave ordinary airport routing active. See the [current acceptance record](docs/research/2026-09-23-release-readiness.md) for tested behavior and limits.
 
 ## What problem does it solve?
 
 Manually writing a nesting script means handling subscription sources, proxy-group names, duplicates, and script destinations yourself. Clash Verge Kit turns that work into a guided terminal flow and lets you review the result before anything is written.
 
-It currently supports:
+The tool supports three tasks:
 
-- discovering subscriptions already imported into Clash Verge Rev;
-- selecting the target subscription and primary proxy group;
-- adding local child subscriptions or public HTTPS subscription URLs;
-- generating a separate proxy group for each child subscription;
-- using AI routing independently or alongside nesting;
-- selecting static and readable provider nodes by source without renaming original airport nodes;
-- reopening, editing and disabling authenticated saved routing plans;
-- reviewing a summary and a script preview with sensitive sources masked;
-- copying the complete script to the clipboard;
-- safely writing the script to the file already bound to the target subscription, after confirmation.
+| Your task | What the tool provides |
+| --- | --- |
+| Use several subscriptions together | Add locally imported subscriptions or child HTTPS URLs as separate proxy groups inside the primary subscription |
+| Choose an AI outlet | Reuse an existing group, or page, search and select nodes from the target and local child subscriptions; use routing independently or alongside nesting |
+| Change the plan later | Reopen an authenticated saved plan to change its outlet, add or remove nodes, or disable AI routing |
+
+All three flows share summaries, masked previews, copying and confirmed safe writes. Nodes retain their original names; writes check source changes and back up the original script.
 
 ## How to use it now
 
@@ -81,9 +78,11 @@ Development and release checks:
 ```powershell
 npm.cmd test
 npm.cmd run check:release
+# With a test Mihomo binary installed, run the full isolated acceptance suite:
+npm.cmd run check:acceptance
 ```
 
-For technical details, see the [local usage guide](docs/deployment.md) and [verification guide](docs/verification.md).
+See the [architecture guide](docs/architecture.md) for the feature-to-file map, and the [local usage guide](docs/deployment.md) and [verification guide](docs/verification.md) for setup and test requirements.
 
 ## License
 
